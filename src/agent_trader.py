@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import logging
-
 from src.decision_types import Decision, TradeAction
 from src.mock_broker import MockBroker
 from src.portfolio import portfolio_value
 from src.rate_limiter import RateLimiter
 from src.strategy_buffett_lite import decide
+
+logger = logging.getLogger(__name__)
+USE_CREW = True
 
 
 def execute_decision(broker: MockBroker, decision: Decision) -> None:
@@ -30,8 +32,13 @@ def main() -> None:
     logging.info("Starting cash: %.2f", start_cash)
     logging.info("Starting positions: %s", start_positions)
     logging.info("Portfolio value before: %.2f", start_value)
-
-    decision = decide(symbols, broker)
+    if USE_CREW:
+        from src.crew_decider import decide_with_crew
+        logger.info("Using CrewAI decision layer")
+        decision = decide_with_crew(symbols, broker)
+    else:
+        logger.info("Using strategy decision layer")
+        decision = decide(symbols, broker)
     logging.info(
         "Decision: %s %s x%d (%s)",
         decision.action,

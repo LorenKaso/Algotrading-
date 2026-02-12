@@ -14,7 +14,11 @@ FAIR_VALUES: dict[str, float] = {
 }
 
 
-def decide(symbols: list[str], broker, max_position_pct: float = 0.4) -> Decision:
+def decide(
+    symbols: list[str],
+    broker,
+    max_position_pct: float = 0.4,
+) -> Decision:
     best_symbol = None
     best_score = float("-inf")
     best_price = 0.0
@@ -22,7 +26,11 @@ def decide(symbols: list[str], broker, max_position_pct: float = 0.4) -> Decisio
     for symbol in symbols:
         price = broker.get_price(symbol)
         if price <= 0:
-            logger.warning("Skipping %s due to non-positive price: %s", symbol, price)
+            logger.warning(
+                "Skipping %s due to non-positive price: %s",
+                symbol,
+                price,
+                )
             continue
         fair = FAIR_VALUES[symbol]
         score = (fair - price) / price
