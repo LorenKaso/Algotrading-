@@ -5,9 +5,9 @@ from src.broker import Broker
 
 class MockBroker(Broker):
     _PRICES: dict[str, float] = {
-        "PLTR": 24.0,
-        "NFLX": 600.0,
-        "PLTK": 8.0,
+        "PLTR": 100.0,
+        "NFLX": 200.0,
+        "PLTK": 20.0,
     }
 
     def __init__(self, starting_cash: float = 100000.0) -> None:

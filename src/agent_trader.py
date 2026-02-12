@@ -24,8 +24,12 @@ def main() -> None:
     limiter = RateLimiter(per_second=1, per_hour=100, per_day=1000)
     symbols = ["PLTR", "NFLX", "PLTK"]
 
+    start_cash = broker.get_cash()
+    start_positions = broker.get_positions()
     start_value = portfolio_value(broker)
-    logging.info("Starting portfolio value: %.2f", start_value)
+    logging.info("Starting cash: %.2f", start_cash)
+    logging.info("Starting positions: %s", start_positions)
+    logging.info("Portfolio value before: %.2f", start_value)
 
     decision = decide(symbols, broker)
     logging.info(
@@ -42,9 +46,12 @@ def main() -> None:
         else:
             execute_decision(broker, decision)
 
+    end_cash = broker.get_cash()
+    end_positions = broker.get_positions()
     end_value = portfolio_value(broker)
-    logging.info("Ending portfolio value: %.2f", end_value)
-    logging.info("Positions: %s", broker.get_positions())
+    logging.info("Ending cash: %.2f", end_cash)
+    logging.info("Ending positions: %s", end_positions)
+    logging.info("Portfolio value after: %.2f", end_value)
 
 
 if __name__ == "__main__":

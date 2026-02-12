@@ -1,7 +1,11 @@
+
 from __future__ import annotations
 
 from src.decision_types import Decision, TradeAction
 from src.portfolio import portfolio_value
+
+import logging
+logger = logging.getLogger(__name__)
 
 FAIR_VALUES: dict[str, float] = {
     "PLTR": 95.0,
@@ -17,6 +21,9 @@ def decide(symbols: list[str], broker, max_position_pct: float = 0.4) -> Decisio
 
     for symbol in symbols:
         price = broker.get_price(symbol)
+        if price <= 0:
+            logger.warning("Skipping %s due to non-positive price: %s", symbol, price)
+            continue
         fair = FAIR_VALUES[symbol]
         score = (fair - price) / price
         if score > best_score:
