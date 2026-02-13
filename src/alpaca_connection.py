@@ -4,7 +4,14 @@ import os
 import sys
 
 from dotenv import load_dotenv
-from alpaca_trade_api.rest import REST
+try:
+    from alpaca_trade_api.rest import REST
+    _ALPACA_IMPORT_ERROR: Exception | None = None
+except Exception as exc:  # pragma: no cover - exercised in environments without alpaca package
+    REST = object  # type: ignore[assignment]
+    _ALPACA_IMPORT_ERROR = exc
+
+_connected_client: REST | None = None
 
 
 def _require_env(name: str) -> str:
@@ -15,6 +22,11 @@ def _require_env(name: str) -> str:
 
 
 def check_alpaca_connection() -> REST:
+    global _connected_client
+    if _ALPACA_IMPORT_ERROR is not None:
+        raise RuntimeError(
+            f"alpaca-trade-api import failed: {_ALPACA_IMPORT_ERROR}"
+        ) from _ALPACA_IMPORT_ERROR
     print("[alpaca] Loading .env file...")
     load_dotenv()
 
@@ -36,6 +48,7 @@ def check_alpaca_connection() -> REST:
     print(
         f"[alpaca] SUCCESS: Connected. Account status={account.status}, equity={account.equity}"
     )
+    _connected_client = client
     return client
 
 
@@ -68,3 +81,7 @@ def run_diagnostics_or_exit(api: REST) -> None:
     except Exception as exc:
         print(f"[diag] ERROR: Diagnostics failed: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
+
+
+def get_connected_client() -> REST | None:
+    return _connected_client

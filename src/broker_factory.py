@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 
-from src.alpaca_broker import AlpacaBroker
 from src.broker import Broker
 from src.mock_broker import MockBroker
 
@@ -13,6 +12,7 @@ def make_broker() -> Broker:
         return MockBroker()
 
     try:
+        from src.alpaca_broker import AlpacaBroker
         return AlpacaBroker()
     except Exception:
         return MockBroker()
