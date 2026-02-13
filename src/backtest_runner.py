@@ -21,6 +21,7 @@ def run_backtest(
     clean_symbols = [symbol.upper() for symbol in symbols]
     cash = float(initial_cash)
     positions = {symbol: 0 for symbol in clean_symbols}
+    avg_entry_prices = {symbol: 0.0 for symbol in clean_symbols}
     buys = 0
     sells = 0
     last_prices = {symbol: 0.0 for symbol in clean_symbols}
@@ -41,6 +42,7 @@ def run_backtest(
             prices=prices,
             cash=cash,
             positions=dict(positions),
+            avg_entry_prices=dict(avg_entry_prices),
         )
         print(f"[backtest] ts={ts.isoformat()} prices={prices}")
 
@@ -49,6 +51,7 @@ def run_backtest(
             prices=snapshot.prices,
             cash=snapshot.cash,
             positions=snapshot.positions,
+            avg_entry_prices=snapshot.avg_entry_prices,
         ).model_dump()
         print(
             "[crew] kickoff inputs=snapshot(ts=%s, prices=%s, cash=%.2f, positions=%s)"
@@ -86,8 +89,13 @@ def run_backtest(
             else:
                 price = prices[symbol]
                 if cash >= price:
+                    current_qty = positions[symbol]
+                    current_avg = avg_entry_prices.get(symbol, 0.0)
                     cash -= price
-                    positions[symbol] += 1
+                    positions[symbol] = current_qty + 1
+                    new_qty = positions[symbol]
+                    total_cost = current_avg * current_qty + price
+                    avg_entry_prices[symbol] = total_cost / new_qty if new_qty > 0 else 0.0
                     buys += 1
                     print(
                         f"[backtest][executor] FILL BUY {symbol} qty=1 at {price:.2f}; "
@@ -106,6 +114,8 @@ def run_backtest(
                 if positions.get(symbol, 0) >= 1:
                     positions[symbol] -= 1
                     cash += price
+                    if positions[symbol] == 0:
+                        avg_entry_prices[symbol] = 0.0
                     sells += 1
                     print(
                         f"[backtest][executor] FILL SELL {symbol} qty=1 at {price:.2f}; "

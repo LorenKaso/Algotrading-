@@ -9,9 +9,13 @@ from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel
 
-from src.crewai_models import DecisionModel, MarketSnapshotModel, RiskResult
+from src.crewai_models import DecisionModel, MarketSnapshotModel, PositionInsight, RiskResult
 from src.strategy_buffett_lite import FAIR_VALUES
 from src.tools import FairValueTool
+from src.tools.strategy_tool import compute_position_insight
+
+TAKE_PROFIT_PCT = 0.05
+STOP_LOSS_PCT = -0.03
 
 try:
     from crewai import Agent, Crew, Task
@@ -115,6 +119,24 @@ def momentum_tool(snapshot: MarketSnapshotModel, state: dict[str, float]) -> Dec
 
 
 def valuation_tool(snapshot: MarketSnapshotModel, symbols: list[str]) -> DecisionModel:
+    for symbol in symbols:
+        qty = int(snapshot.positions.get(symbol, 0))
+        price = snapshot.prices.get(symbol)
+        if qty <= 0 or price is None or price <= 0:
+            continue
+        avg_entry = float(snapshot.avg_entry_prices.get(symbol, 0.0))
+        insight: PositionInsight = compute_position_insight(
+            {"symbol": symbol, "qty": qty, "avg_entry_price": avg_entry},
+            current_price=price,
+        )
+        pnl_pct_display = f"{insight.pnl_pct * 100:+.1f}%"
+        if insight.pnl_pct >= TAKE_PROFIT_PCT:
+            print(f"[strategy] {symbol} pnl={pnl_pct_display} take-profit triggered")
+            return DecisionModel(action="SELL", symbol=symbol, reason="take profit hit")
+        if insight.pnl_pct <= STOP_LOSS_PCT:
+            print(f"[strategy] {symbol} pnl={pnl_pct_display} stop-loss triggered")
+            return DecisionModel(action="SELL", symbol=symbol, reason="stop loss hit")
+
     fair_value_tool = FairValueTool()
     best_buy: tuple[str, float, float] | None = None
     best_sell: tuple[str, float, float] | None = None
@@ -219,31 +241,33 @@ def coordinate_tool(
                 f"valuation={valuation.action}:{valuation.reason}"
             ),
         )
-    if valuation.action in {"BUY", "SELL"}:
+    if valuation.action == "SELL":
         return DecisionModel(
-            action=valuation.action,
+            action="SELL",
             symbol=valuation.symbol,
-            reason=(
-                f"risk approve: {risk.reason} | "
-                f"market={market.action}:{market.reason} | "
-                f"valuation={valuation.action}:{valuation.reason}"
-            ),
+            reason=valuation.reason,
         )
-    if market.action in {"BUY", "SELL"}:
+    if valuation.action == "BUY":
+        if market.action == "SELL":
+            return DecisionModel(
+                action="HOLD",
+                symbol=None,
+                reason=(
+                    f"buy blocked by market sell | "
+                    f"market={market.action}:{market.reason} | "
+                    f"valuation={valuation.action}:{valuation.reason}"
+                ),
+            )
         return DecisionModel(
-            action=market.action,
-            symbol=market.symbol,
-            reason=(
-                f"risk approve: {risk.reason} | "
-                f"market={market.action}:{market.reason} | "
-                f"valuation={valuation.action}:{valuation.reason}"
-            ),
+            action="BUY",
+            symbol=valuation.symbol,
+            reason=valuation.reason,
         )
     return DecisionModel(
         action="HOLD",
         symbol=None,
         reason=(
-            f"risk approve: {risk.reason} | "
+            f"no actionable signal | "
             f"market={market.action}:{market.reason} | "
             f"valuation={valuation.action}:{valuation.reason}"
         ),
@@ -357,8 +381,8 @@ def build_trading_crew(
     task_valuation = Task(
         name="task_valuation",
         description=(
-            "Use valuation scoring and produce ONLY a DecisionModel JSON/pydantic output. "
-            "No prose."
+            "Use valuation + strategy exits and produce ONLY a DecisionModel JSON/pydantic output. "
+            "Rules include SELL exits on take-profit and stop-loss, else BUY/HOLD from valuation."
         ),
         expected_output="DecisionModel",
         agent=valuation_agent,
@@ -386,7 +410,8 @@ def build_trading_crew(
             "Inputs: Market DecisionModel, Valuation DecisionModel, RiskResult. "
             "Rules: if risk.status == VETO => HOLD with "
             "\"risk veto: <risk.reason> | market=<...> | valuation=<...>\". "
-            "Else valuation BUY/SELL has priority over market; otherwise HOLD."
+            "Else valuation SELL has priority. BUY only if valuation BUY and market is not SELL. "
+            "Otherwise HOLD."
         ),
         expected_output="DecisionModel",
         agent=coordinator_agent,

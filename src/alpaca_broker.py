@@ -60,6 +60,16 @@ class AlpacaBroker(Broker):
 
         return positions
 
+    def get_avg_entry_prices(self) -> dict[str, float]:
+        self._check_rate_limit("alpaca:get_positions")
+        positions_list = self._trading.get_all_positions()
+        entry_prices: dict[str, float] = {}
+        for pos in positions_list:
+            symbol = pos.symbol  # type: ignore[attr-defined]
+            avg_entry_price = pos.avg_entry_price  # type: ignore[attr-defined]
+            entry_prices[symbol] = float(avg_entry_price)
+        return entry_prices
+
     def get_price(self, symbol: str) -> float:
         self._check_rate_limit(f"alpaca:get_price:{symbol}")
         cached = self._price_cache.get(symbol)

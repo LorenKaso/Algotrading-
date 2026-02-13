@@ -10,6 +10,7 @@ class MarketSnapshotModel(BaseModel):
     prices: dict[str, float]
     cash: float
     positions: dict[str, int]
+    avg_entry_prices: dict[str, float] = Field(default_factory=dict)
 
 
 class DecisionModel(BaseModel):
@@ -21,3 +22,10 @@ class DecisionModel(BaseModel):
 class RiskResult(BaseModel):
     status: Literal["APPROVE", "VETO"]
     reason: str
+
+
+class PositionInsight(BaseModel):
+    symbol: str
+    avg_entry_price: float
+    current_price: float
+    pnl_pct: float

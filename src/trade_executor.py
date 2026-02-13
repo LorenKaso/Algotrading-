@@ -62,6 +62,13 @@ def execute_action(api_client, snapshot: MarketSnapshot, action: Decision) -> No
         if qty < 1:
             print("[executor] SKIP: position cap reached")
             return
+    elif action.action == TradeAction.SELL:
+        current_position = int(snapshot.positions.get(symbol, 0))
+        if current_position <= 0:
+            print(f"[executor] SKIP: no position available to SELL for {symbol}")
+            return
+        qty = min(1, current_position)
+        print(f"[executor] SELL {qty} {symbol} reason={action.reason}")
 
     if qty > limits.max_shares_per_trade:
         print(

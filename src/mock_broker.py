@@ -13,6 +13,7 @@ class MockBroker(Broker):
     def __init__(self, starting_cash: float = 100000.0) -> None:
         self._cash = float(starting_cash)
         self._positions: dict[str, int] = {s: 0 for s in self._PRICES}
+        self._avg_entry_prices: dict[str, float] = {s: 0.0 for s in self._PRICES}
         self._open_orders: list[dict[str, str]] = []
 
     def get_cash(self) -> float:
@@ -20,6 +21,9 @@ class MockBroker(Broker):
 
     def get_positions(self) -> dict[str, int]:
         return dict(self._positions)
+
+    def get_avg_entry_prices(self) -> dict[str, float]:
+        return dict(self._avg_entry_prices)
 
     def get_price(self, symbol: str) -> float:
         self._validate_symbol(symbol)
@@ -37,14 +41,22 @@ class MockBroker(Broker):
         if side == "buy":
             if cost > self._cash:
                 raise ValueError("insufficient cash")
+            current_qty = self._positions[symbol]
+            current_avg = self._avg_entry_prices[symbol]
+            new_qty = current_qty + qty
+            if new_qty > 0:
+                total_cost = current_avg * current_qty + price * qty
+                self._avg_entry_prices[symbol] = total_cost / new_qty
             self._cash -= cost
-            self._positions[symbol] += qty
+            self._positions[symbol] = new_qty
             return
 
         if qty > self._positions[symbol]:
             raise ValueError("insufficient position")
         self._cash += cost
         self._positions[symbol] -= qty
+        if self._positions[symbol] == 0:
+            self._avg_entry_prices[symbol] = 0.0
 
     def list_open_orders(
         self,

@@ -17,12 +17,12 @@ class _MockApiClient:
         return SimpleNamespace(id="order-1", status="accepted")
 
 
-def _snapshot() -> MarketSnapshot:
+def _snapshot(position_qty: int = 0) -> MarketSnapshot:
     return MarketSnapshot(
         timestamp=datetime.now(tz=timezone.utc),
         prices={"PLTR": 100.0},
         cash=10000.0,
-        positions={"PLTR": 0},
+        positions={"PLTR": position_qty},
     )
 
 
@@ -43,10 +43,10 @@ def test_execute_action_executes_when_enabled(monkeypatch) -> None:
     configure_trade_executor(None)
     action = Decision(action=TradeAction.SELL, symbol="PLTR", qty=2, reason="test")
 
-    execute_action(api, _snapshot(), action)
+    execute_action(api, _snapshot(position_qty=3), action)
 
     assert len(api.calls) == 1
     call = api.calls[0]
     assert call["symbol"] == "PLTR"
-    assert call["qty"] == 2
+    assert call["qty"] == 1
     assert call["side"] == "sell"

@@ -177,6 +177,7 @@ class TradingFlow(Flow):
                     prices=snapshot.prices,
                     cash=snapshot.cash,
                     positions=snapshot.positions,
+                    avg_entry_prices=snapshot.avg_entry_prices,
                 ).model_dump()
 
                 assert self.crew is not None
@@ -233,6 +234,7 @@ class TradingFlow(Flow):
         cash = float(self.broker.get_cash())
         self._wait_for_rate_limit("broker:get_positions")
         positions = self.broker.get_positions()
+        avg_entry_prices = self._get_avg_entry_prices()
         price_fetcher = market_data.get_latest_price if self.api_client is not None else self.broker.get_price
         prices: dict[str, float] = {}
         for symbol in self.SYMBOLS:
@@ -243,6 +245,7 @@ class TradingFlow(Flow):
             prices=prices,
             cash=cash,
             positions=positions,
+            avg_entry_prices=avg_entry_prices,
         )
 
     def _final_decision_from_tasks(self) -> DecisionModel:
@@ -304,6 +307,18 @@ class TradingFlow(Flow):
         while not self.rate_limiter.allow(key):
             print(f"[data] Rate limit reached for {key}; sleeping 0.2s")
             time.sleep(0.2)
+
+    def _get_avg_entry_prices(self) -> dict[str, float]:
+        assert self.broker is not None
+        getter = getattr(self.broker, "get_avg_entry_prices", None)
+        if getter is None:
+            return {}
+        self._wait_for_rate_limit("broker:get_avg_entry_prices")
+        try:
+            values = getter()
+            return {str(symbol).upper(): float(price) for symbol, price in values.items()}
+        except Exception:
+            return {}
 
     def _parse_backtest_start(self) -> date:
         raw = os.getenv("BACKTEST_START", "").strip()

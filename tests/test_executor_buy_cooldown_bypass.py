@@ -17,12 +17,12 @@ class _ApiClient:
         return SimpleNamespace(id="order-1", status="accepted")
 
 
-def _snapshot(price: float) -> MarketSnapshot:
+def _snapshot(price: float, position_qty: int = 0) -> MarketSnapshot:
     return MarketSnapshot(
         timestamp=datetime.now(tz=timezone.utc),
         prices={"PLTR": price},
         cash=10000.0,
-        positions={"PLTR": 0},
+        positions={"PLTR": position_qty},
     )
 
 
@@ -60,8 +60,8 @@ def test_sell_is_not_blocked_by_cooldown(monkeypatch) -> None:
 
     now = {"value": 2000.0}
     monkeypatch.setattr("src.trade_executor.time.time", lambda: now["value"])
-    execute_action(api, _snapshot(100.0), action)
+    execute_action(api, _snapshot(100.0, position_qty=2), action)
     now["value"] = 2005.0
-    execute_action(api, _snapshot(99.0), action)
+    execute_action(api, _snapshot(99.0, position_qty=2), action)
 
     assert len(api.calls) == 2

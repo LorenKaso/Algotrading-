@@ -10,6 +10,9 @@ class Broker(Protocol):
     def get_positions(self) -> dict[str, int]:
         ...
 
+    def get_avg_entry_prices(self) -> dict[str, float]:
+        ...
+
     def get_price(self, symbol: str) -> float:
         ...
 
