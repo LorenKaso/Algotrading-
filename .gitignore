@@ -1,47 +1,26 @@
-# Python
+﻿# Python
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
-*.egg-info/
-dist/
-build/
-.cache/
-.ruff_cache/
+*.pytest_cache/
 
-
-# Virtual environment
+# Virtual env
 .venv/
 venv/
 env/
 
-# Pytest
-.pytest_cache/
+# Caches
+.cache/
 
-# VS Code
-.vscode/
-
-# OS
+# OS / Editor
 .DS_Store
 Thumbs.db
-
-# Env / secrets
-.env
-.env.*
-secrets.json
+.vscode/
+.idea/
 
 # Logs
 *.log
 
-# Coverage
-.coverage
-htmlcov/
-
-# Jupyter
-.ipynb_checkpoints/
-
-# Mypy / type check
-.mypy_cache/
-
-# Ruff / linters
-.ruff_cache/
+# Env secrets
+.env
