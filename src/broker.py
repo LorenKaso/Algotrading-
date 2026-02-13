@@ -15,3 +15,13 @@ class Broker(Protocol):
 
     def place_order(self, symbol: str, side: str, qty: int) -> None:
         ...
+
+    def list_open_orders(
+        self,
+        symbol: str | None = None,
+        side: str | None = None,
+    ) -> list[dict[str, str]]:
+        ...
+
+    def has_open_order(self, symbol: str, side: str) -> bool:
+        ...

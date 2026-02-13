@@ -1,89 +1,227 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from src.decision_types import Decision, TradeAction
 from src.market_snapshot import MarketSnapshot
 from src.strategy_buffett_lite import FAIR_VALUES
 from src.tools import FairValueTool
 
-try:
-    from crewai import Agent, Crew, Task
-except Exception:  # pragma: no cover
-    class Agent:
-        def __init__(
-            self,
-            role: str,
-            goal: str,
-            backstory: str = "",
-            allow_delegation: bool = False,
-            verbose: bool = False,
-        ) -> None:
-            self.role = role
-            self.goal = goal
-            self.backstory = backstory
-            self.allow_delegation = allow_delegation
-            self.verbose = verbose
-
-    class Task:
-        def __init__(self, description: str, expected_output: str, agent: Agent) -> None:
-            self.description = description
-            self.expected_output = expected_output
-            self.agent = agent
-
-    class Crew:
-        def __init__(self, agents: list[Agent], tasks: list[Task]) -> None:
-            self.agents = agents
-            self.tasks = tasks
-
-        def kickoff(self, inputs: dict) -> dict:
-            return inputs
+_MARKET_PRICE_CACHE: dict[str, float] = {}
 
 
-def _market_agent(snapshot: MarketSnapshot, symbols: list[str]) -> dict:
-    prices = {symbol: snapshot.prices[symbol] for symbol in symbols if symbol in snapshot.prices}
-    return {
-        "prices": prices,
-        "cash": snapshot.cash,
-        "positions": dict(snapshot.positions),
-    }
+def _normalize_symbols(symbols: list[str] | None, snapshot: MarketSnapshot) -> list[str]:
+    if symbols is None:
+        symbols = list(snapshot.prices.keys())
+    return [symbol.upper() for symbol in symbols]
 
 
-def _valuation_agent(prices: dict[str, float], tool: FairValueTool) -> dict[str, float]:
-    scores = {}
-    for symbol, price in prices.items():
-        scores[symbol] = tool.run(price, FAIR_VALUES[symbol])
-    return scores
+@dataclass(frozen=True)
+class CoordinationResult:
+    market_decision: Decision
+    valuation_decision: Decision
+    risk_decision: Decision
+    final_decision: Decision
 
 
-def _risk_agent(
-    prices: dict[str, float],
-    positions: dict[str, int],
-    cash: float,
-    max_position_pct: float,
-) -> dict[str, bool]:
-    total = cash + sum(positions.get(symbol, 0) * price for symbol, price in prices.items())
-    risk_ok = {}
-    for symbol, price in prices.items():
-        current_qty = positions.get(symbol, 0)
-        proposed_value = current_qty * price + price
-        risk_ok[symbol] = total <= 0 or proposed_value <= max_position_pct * total
-    return risk_ok
+class MarketAgent:
+    def __init__(self, symbols: list[str]) -> None:
+        self._symbols = symbols
+        self._last_prices = _MARKET_PRICE_CACHE
+
+    def decide(self, snapshot: MarketSnapshot) -> Decision:
+        best_symbol: str | None = None
+        best_change = float("-inf")
+
+        for symbol in self._symbols:
+            price = snapshot.prices.get(symbol)
+            if price is None or price <= 0:
+                continue
+            previous = self._last_prices.get(symbol)
+            if previous is not None and previous > 0:
+                pct_change = (price - previous) / previous
+                if pct_change > best_change:
+                    best_change = pct_change
+                    best_symbol = symbol
+            self._last_prices[symbol] = price
+
+        if best_symbol is None:
+            return Decision(
+                action=TradeAction.HOLD,
+                symbol=None,
+                qty=0,
+                reason="no momentum signal",
+            )
+
+        if best_change >= 0.01:
+            return Decision(
+                action=TradeAction.BUY,
+                symbol=best_symbol,
+                qty=1,
+                reason=f"momentum up {best_change * 100:.2f}%",
+            )
+
+        if best_change <= -0.01 and snapshot.positions.get(best_symbol, 0) > 0:
+            return Decision(
+                action=TradeAction.SELL,
+                symbol=best_symbol,
+                qty=1,
+                reason=f"momentum down {abs(best_change) * 100:.2f}%",
+            )
+
+        return Decision(
+            action=TradeAction.HOLD,
+            symbol=None,
+            qty=0,
+            reason=f"momentum neutral {best_change * 100:.2f}%",
+        )
 
 
-def _coordination_agent(
-    scores: dict[str, float],
-    risk_ok: dict[str, bool],
-    prices: dict[str, float],
-) -> Decision:
-    best_symbol = max(scores, key=scores.get) if scores else None
-    best_score = scores[best_symbol] if best_symbol else float("-inf")
-    if not best_symbol or best_score <= 0.03:
-        return Decision(action=TradeAction.HOLD, symbol=None, qty=0, reason="not undervalued enough")
-    price = prices[best_symbol]
-    if not risk_ok.get(best_symbol, False):
-        return Decision(action=TradeAction.HOLD, symbol=None, qty=0, reason="risk cap")
-    fair = FAIR_VALUES[best_symbol]
-    reason = f"score={best_score:.3f}, fair={fair:.2f}, price={price:.2f}"
-    return Decision(action=TradeAction.BUY, symbol=best_symbol, qty=1, reason=reason)
+class ValuationAgent:
+    def __init__(self, symbols: list[str]) -> None:
+        self._symbols = symbols
+        self._tool = FairValueTool()
+
+    def decide(self, snapshot: MarketSnapshot) -> Decision:
+        best_buy: tuple[str, float, float] | None = None
+        best_sell: tuple[str, float, float] | None = None
+
+        for symbol in self._symbols:
+            price = snapshot.prices.get(symbol)
+            fair = FAIR_VALUES.get(symbol)
+            if fair is None or price is None or price <= 0:
+                continue
+            score = self._tool.run(price=price, fair=fair)
+            if best_buy is None or score > best_buy[1]:
+                best_buy = (symbol, score, price)
+            if best_sell is None or score < best_sell[1]:
+                best_sell = (symbol, score, price)
+
+        if best_buy is not None and best_buy[1] >= 0.03:
+            fair = FAIR_VALUES[best_buy[0]]
+            return Decision(
+                action=TradeAction.BUY,
+                symbol=best_buy[0],
+                qty=1,
+                reason=f"score={best_buy[1]:.3f}, fair={fair:.2f}, price={best_buy[2]:.2f}",
+            )
+
+        if best_sell is not None and best_sell[1] <= -0.03 and snapshot.positions.get(best_sell[0], 0) > 0:
+            fair = FAIR_VALUES[best_sell[0]]
+            return Decision(
+                action=TradeAction.SELL,
+                symbol=best_sell[0],
+                qty=1,
+                reason=f"score={best_sell[1]:.3f}, fair={fair:.2f}, price={best_sell[2]:.2f}",
+            )
+
+        return Decision(
+            action=TradeAction.HOLD,
+            symbol=None,
+            qty=0,
+            reason="not undervalued enough",
+        )
+
+
+class RiskAgent:
+    def __init__(
+        self,
+        symbols: list[str],
+        allowed_symbols: set[str] | None = None,
+        market_is_open: bool | None = None,
+    ) -> None:
+        self._symbols = symbols
+        self._allowed_symbols = {symbol.upper() for symbol in (allowed_symbols or set(symbols))}
+        self._market_is_open = market_is_open
+
+    def decide(self, snapshot: MarketSnapshot) -> Decision:
+        if self._market_is_open is False:
+            return Decision(TradeAction.HOLD, None, 0, "VETO: market closed")
+
+        for symbol in self._symbols:
+            if symbol not in self._allowed_symbols:
+                return Decision(TradeAction.HOLD, None, 0, f"VETO: symbol not allowed ({symbol})")
+            price = snapshot.prices.get(symbol)
+            if price is None or price <= 0:
+                return Decision(TradeAction.HOLD, None, 0, f"VETO: price missing for {symbol}")
+
+        minimum_price = min(snapshot.prices[symbol] for symbol in self._symbols if symbol in snapshot.prices)
+        if snapshot.cash < minimum_price:
+            return Decision(TradeAction.HOLD, None, 0, "VETO: cash too low")
+
+        return Decision(TradeAction.HOLD, None, 0, "APPROVE: risk checks passed")
+
+
+class CoordinatorAgent:
+    def __init__(
+        self,
+        market_decision: Decision,
+        valuation_decision: Decision,
+        risk_decision: Decision,
+    ) -> None:
+        self._market_decision = market_decision
+        self._valuation_decision = valuation_decision
+        self._risk_decision = risk_decision
+
+    def decide(self, snapshot: MarketSnapshot) -> Decision:
+        _ = snapshot
+        merged = (
+            f"market={self._market_decision.action.value}:{self._market_decision.reason} | "
+            f"valuation={self._valuation_decision.action.value}:{self._valuation_decision.reason} | "
+            f"risk={self._risk_decision.reason}"
+        )
+        if self._risk_decision.reason.upper().startswith("VETO"):
+            return Decision(TradeAction.HOLD, None, 0, merged)
+
+        if self._valuation_decision.action in {TradeAction.BUY, TradeAction.SELL}:
+            return Decision(
+                action=self._valuation_decision.action,
+                symbol=self._valuation_decision.symbol,
+                qty=self._valuation_decision.qty,
+                reason=merged,
+            )
+
+        if self._market_decision.action in {TradeAction.BUY, TradeAction.SELL}:
+            return Decision(
+                action=self._market_decision.action,
+                symbol=self._market_decision.symbol,
+                qty=self._market_decision.qty,
+                reason=merged,
+            )
+
+        return Decision(TradeAction.HOLD, None, 0, merged)
+
+
+def decide(
+    snapshot: MarketSnapshot,
+    symbols: list[str] | None = None,
+    allowed_symbols: set[str] | None = None,
+    market_is_open: bool | None = None,
+) -> CoordinationResult:
+    normalized_symbols = _normalize_symbols(symbols, snapshot)
+    market_agent = MarketAgent(normalized_symbols)
+    valuation_agent = ValuationAgent(normalized_symbols)
+    risk_agent = RiskAgent(
+        symbols=normalized_symbols,
+        allowed_symbols=allowed_symbols,
+        market_is_open=market_is_open,
+    )
+
+    market_decision = market_agent.decide(snapshot)
+    valuation_decision = valuation_agent.decide(snapshot)
+    risk_decision = risk_agent.decide(snapshot)
+    coordinator = CoordinatorAgent(
+        market_decision=market_decision,
+        valuation_decision=valuation_decision,
+        risk_decision=risk_decision,
+    )
+    final_decision = coordinator.decide(snapshot)
+    return CoordinationResult(
+        market_decision=market_decision,
+        valuation_decision=valuation_decision,
+        risk_decision=risk_decision,
+        final_decision=final_decision,
+    )
 
 
 def decide_with_crew(
@@ -91,66 +229,5 @@ def decide_with_crew(
     symbols: list[str],
     max_position_pct: float = 0.4,
 ) -> Decision:
-    market_agent = Agent(
-        role="MarketAgent",
-        goal="Collect prices, positions, and cash",
-        backstory="A data specialist that gathers deterministic broker snapshots.",
-        allow_delegation=False,
-        verbose=False,
-    )
-    val_agent = Agent(
-        role="ValuationAgent",
-        goal="Compute fair value score per symbol",
-        backstory="A valuation analyst that applies the fair value scoring tool.",
-        allow_delegation=False,
-        verbose=False,
-    )
-    risk_agent = Agent(
-        role="RiskAgent",
-        goal="Check max position exposure limit",
-        backstory="A risk controller enforcing position-size constraints.",
-        allow_delegation=False,
-        verbose=False,
-    )
-    dec_agent = Agent(
-        role="CoordinationAgent",
-        goal="Merge sub-agent outputs and choose final BUY/HOLD action",
-        backstory="A deterministic coordinator that resolves all agent outputs.",
-        allow_delegation=False,
-        verbose=False,
-    )
-    crew = Crew(
-        agents=[market_agent, val_agent, risk_agent, dec_agent],
-        tasks=[
-            Task(
-                description="Collect market snapshot fields for candidate symbols.",
-                expected_output="Context contains cash, positions, and snapshot prices per symbol.",
-                agent=market_agent,
-            ),
-            Task(
-                description="Compute fair-value-based scores for each symbol.",
-                expected_output="Context contains a score per symbol in ctx['scores'].",
-                agent=val_agent,
-            ),
-            Task(
-                description="Evaluate max position exposure for a 1-share buy per symbol.",
-                expected_output="Context contains risk gates in ctx['risk_ok'] keyed by symbol.",
-                agent=risk_agent,
-            ),
-            Task(
-                description="Choose final BUY/HOLD action with reason from prior context.",
-                expected_output="Context contains final payload in ctx['result'].",
-                agent=dec_agent,
-            ),
-        ],
-    )
-    _ = crew
-    market_ctx = _market_agent(snapshot, symbols)
-    scores = _valuation_agent(market_ctx["prices"], FairValueTool())
-    risk_ok = _risk_agent(
-        market_ctx["prices"],
-        market_ctx["positions"],
-        market_ctx["cash"],
-        max_position_pct,
-    )
-    return _coordination_agent(scores, risk_ok, market_ctx["prices"])
+    _ = max_position_pct
+    return decide(snapshot=snapshot, symbols=symbols).final_decision

@@ -6,8 +6,8 @@ import time
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockLatestTradeRequest
 from alpaca.trading.client import TradingClient
-from alpaca.trading.enums import OrderSide, TimeInForce
-from alpaca.trading.requests import MarketOrderRequest
+from alpaca.trading.enums import OrderSide, QueryOrderStatus, TimeInForce
+from alpaca.trading.requests import GetOrdersRequest, MarketOrderRequest
 from dotenv import load_dotenv
 
 from src.broker import Broker
@@ -89,6 +89,29 @@ class AlpacaBroker(Broker):
             time_in_force=TimeInForce.DAY,
         )
         self._trading.submit_order(order_data=order)
+
+    def list_open_orders(
+        self,
+        symbol: str | None = None,
+        side: str | None = None,
+    ) -> list[dict[str, str]]:
+        self._check_rate_limit("alpaca:list_open_orders")
+        request = GetOrdersRequest(
+            status=QueryOrderStatus.OPEN,
+            symbols=[symbol] if symbol else None,
+            side=OrderSide.BUY if side == "buy" else (OrderSide.SELL if side == "sell" else None),
+        )
+        orders = self._trading.get_orders(filter=request)
+        return [
+            {
+                "symbol": str(order.symbol).upper(),  # type: ignore[attr-defined]
+                "side": str(order.side).lower(),      # type: ignore[attr-defined]
+            }
+            for order in orders
+        ]
+
+    def has_open_order(self, symbol: str, side: str) -> bool:
+        return any(self.list_open_orders(symbol=symbol, side=side))
 
     def _check_rate_limit(self, key: str) -> None:
         if self._rate_limiter is None:

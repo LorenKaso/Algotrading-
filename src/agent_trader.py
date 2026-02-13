@@ -10,18 +10,16 @@ from typing import Callable
 
 from src.alpaca_connection import run_diagnostics_or_exit, verify_or_exit
 from src.broker_factory import make_broker
-from src.crew_decider import decide_with_crew
-from src.decision_types import Decision, TradeAction
+from src.crew_decider import decide
+from src.decision_types import Decision
 from src.market_data import configure_api_client, get_latest_price
 from src.market_snapshot import MarketSnapshot
 from src.rate_limiter import RateLimiter
-from src.strategy_buffett_lite import decide_from_snapshot
 from src.trade_executor import configure_trade_executor, execute_action
 
 logger = logging.getLogger(__name__)
 
 PORTFOLIO_SYMBOLS = ["PLTR", "NFLX", "PLTK"]
-AGENTS = ["crew", "value"]
 MAX_POSITION_PCT = 0.4
 
 
@@ -30,25 +28,6 @@ def _compute_portfolio_value(snapshot: MarketSnapshot) -> float:
         snapshot.positions.get(symbol, 0) * snapshot.prices.get(symbol, 0.0)
         for symbol in snapshot.prices
     )
-
-
-def _aggregate_decisions(decisions: list[Decision]) -> Decision:
-    actionable = [decision for decision in decisions if decision.action != TradeAction.HOLD]
-    if not actionable:
-        return Decision(
-            action=TradeAction.HOLD,
-            symbol=None,
-            qty=0,
-            reason="all agents hold",
-        )
-
-    votes: dict[tuple[TradeAction, str, int], int] = {}
-    for decision in actionable:
-        key = (decision.action, decision.symbol or "", decision.qty)
-        votes[key] = votes.get(key, 0) + 1
-    best = max(votes.items(), key=lambda item: item[1])[0]
-    reason = "; ".join(f"{d.action.value}:{d.symbol}:{d.reason}" for d in decisions)
-    return Decision(action=best[0], symbol=best[1], qty=best[2], reason=reason)
 
 
 def _wait_for_rate_limit(rate_limiter: RateLimiter | None, key: str) -> None:
@@ -81,24 +60,32 @@ def _build_snapshot(
     )
 
 
-def _run_agents(snapshot: MarketSnapshot, symbols: list[str]) -> list[Decision]:
-    decisions: list[Decision] = []
-    for agent_name in AGENTS:
-        if agent_name == "crew":
-            decision = decide_with_crew(
-                snapshot=snapshot,
-                symbols=symbols,
-                max_position_pct=MAX_POSITION_PCT,
-            )
-        else:
-            decision = decide_from_snapshot(
-                snapshot=snapshot,
-                symbols=symbols,
-                max_position_pct=MAX_POSITION_PCT,
-            )
-        print(f"[agent] {agent_name} -> {decision.action.value} {decision.symbol} ({decision.reason})")
-        decisions.append(decision)
-    return decisions
+def _get_market_open_state(broker) -> bool | None:
+    checker = getattr(broker, "is_market_open", None)
+    if checker is None:
+        return None
+    try:
+        return bool(checker())
+    except Exception:
+        return None
+
+
+def _run_agents(snapshot: MarketSnapshot, symbols: list[str], broker) -> Decision:
+    coordination = decide(
+        snapshot=snapshot,
+        symbols=symbols,
+        allowed_symbols=set(symbols),
+        market_is_open=_get_market_open_state(broker),
+    )
+    market = coordination.market_decision
+    valuation = coordination.valuation_decision
+    risk = coordination.risk_decision
+    final = coordination.final_decision
+    print(f"[agent][market] {market.action.value} {market.symbol} ({market.reason})")
+    print(f"[agent][valuation] {valuation.action.value} {valuation.symbol} ({valuation.reason})")
+    print(f"[agent][risk] {risk.reason}")
+    print(f"[agent][coord] final={final.action.value} {final.symbol} ({final.reason})")
+    return final
 
 
 def run_trading_loop(
@@ -125,9 +112,7 @@ def run_trading_loop(
             for symbol, price in snapshot.prices.items():
                 print(f"[data] {symbol} latest={price}")
 
-            decisions = _run_agents(snapshot, symbols)
-            chosen_action = _aggregate_decisions(decisions)
-            print(f"[agent] aggregated -> {chosen_action.action.value} {chosen_action.symbol}")
+            chosen_action = _run_agents(snapshot, symbols, broker)
             execute_action(api_client, snapshot, chosen_action)
 
             portfolio_value = _compute_portfolio_value(snapshot)

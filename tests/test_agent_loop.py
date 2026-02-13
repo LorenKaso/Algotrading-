@@ -21,9 +21,11 @@ class _DummyBroker:
 def test_agent_loop_builds_snapshot(monkeypatch) -> None:
     captured: list[MarketSnapshot] = []
 
-    def fake_run_agents(snapshot: MarketSnapshot, symbols: list[str]):
+    def fake_run_agents(snapshot: MarketSnapshot, symbols: list[str], broker):
+        _ = symbols
+        _ = broker
         captured.append(snapshot)
-        return [Decision(action=TradeAction.HOLD, symbol=None, qty=0, reason="test")]
+        return Decision(action=TradeAction.HOLD, symbol=None, qty=0, reason="test")
 
     monkeypatch.setattr(agent_trader, "_run_agents", fake_run_agents)
     monkeypatch.setattr(agent_trader, "execute_action", lambda *args, **kwargs: None)
