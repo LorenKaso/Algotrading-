@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import os
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Callable
 
 from src.alpaca_connection import run_diagnostics_or_exit, verify_or_exit
+from src.backtest_runner import run_backtest
 from src.broker_factory import make_broker
 from src.crewai_models import DecisionModel, MarketSnapshotModel, RiskResult
 from src.decision_types import Decision, TradeAction
-from src.market_data import configure_api_client, get_latest_price
+import src.market_data as market_data
 from src.market_snapshot import MarketSnapshot
 from src.rate_limiter import RateLimiter
 from src.trade_executor import configure_trade_executor, execute_action
@@ -54,6 +55,12 @@ class TradingFlow(Flow):
         self.diag_mode = False
         self.execute_mode = False
         self.loop_interval_seconds = 5.0
+        self.backtest_mode = False
+        self.backtest_start: date | None = None
+        self.backtest_days = 5
+        self.backtest_step_min = 60
+        self.backtest_initial_cash = 100000.0
+        self.backtest_report: dict | None = None
 
         self.broker = None
         self.api_client = None
@@ -75,6 +82,7 @@ class TradingFlow(Flow):
         self.run_mode = os.getenv("RUN_MODE", "mock").strip().lower() or "mock"
         self.diag_mode = os.getenv("DIAG", "").strip() == "1"
         self.execute_mode = os.getenv("EXECUTE", "").strip() == "1"
+        self.backtest_mode = os.getenv("BACKTEST", "").strip() == "1"
         loop_raw = os.getenv("LOOP_INTERVAL_SEC", os.getenv("LOOP_INTERVAL_SECONDS", "5"))
         try:
             self.loop_interval_seconds = float(loop_raw)
@@ -82,9 +90,26 @@ class TradingFlow(Flow):
             self.loop_interval_seconds = 5.0
         if self.loop_interval_seconds < 0:
             self.loop_interval_seconds = 0.0
+        if self.backtest_mode:
+            self.backtest_start = self._parse_backtest_start()
+            self.backtest_days = self._read_int_env("BACKTEST_DAYS", default=5, minimum=1)
+            self.backtest_step_min = self._read_int_env("BACKTEST_STEP_MIN", default=60, minimum=1)
+            self.backtest_initial_cash = self._read_float_env("BACKTEST_INITIAL_CASH", default=100000.0, minimum=0.0)
 
         print(f"[startup] RUN_MODE={self.run_mode}")
         print(f"[startup] EXECUTE={'1' if self.execute_mode else '0'} (1 means real paper orders enabled)")
+        if self.backtest_mode:
+            print(
+                "[backtest] ENABLED start=%s days=%d step_min=%d initial_cash=%.2f"
+                % (
+                    self.backtest_start.isoformat() if self.backtest_start else "unset",
+                    self.backtest_days,
+                    self.backtest_step_min,
+                    self.backtest_initial_cash,
+                )
+            )
+            if self.execute_mode:
+                print("[backtest] EXECUTE is ignored in backtest mode; no broker orders will be sent.")
 
         self.broker = make_broker()
         self.rate_limiter = RateLimiter(per_second=3, per_hour=1000, per_day=5000)
@@ -94,7 +119,7 @@ class TradingFlow(Flow):
         if self.run_mode == "alpaca":
             print("[startup] Running Alpaca connection check...")
             self.api_client = verify_or_exit()
-            configure_api_client(self.api_client, rate_limiter=self.rate_limiter, cache_ttl_seconds=5.0)
+            market_data.configure_api_client(self.api_client, rate_limiter=self.rate_limiter, cache_ttl_seconds=5.0)
             if self.diag_mode:
                 run_diagnostics_or_exit(self.api_client)
                 print("[startup] DIAG=1 complete. Exiting before trading loop.")
@@ -121,6 +146,23 @@ class TradingFlow(Flow):
 
     @listen(initialize)
     def run_iteration(self, _signal: str) -> str:
+        if self.backtest_mode:
+            assert self.backtest_start is not None
+            assert self.broker is not None
+            assert self.crew is not None
+            self.backtest_report = run_backtest(
+                broker=self.broker,
+                market_data=market_data,
+                crew=self.crew,
+                symbols=self.SYMBOLS,
+                start_date=self.backtest_start,
+                days=self.backtest_days,
+                step_min=self.backtest_step_min,
+                initial_cash=self.backtest_initial_cash,
+            )
+            self.stop()
+            return "backtest-complete"
+
         while not self._stop_requested:
             try:
                 self.iteration += 1
@@ -191,7 +233,7 @@ class TradingFlow(Flow):
         cash = float(self.broker.get_cash())
         self._wait_for_rate_limit("broker:get_positions")
         positions = self.broker.get_positions()
-        price_fetcher = get_latest_price if self.api_client is not None else self.broker.get_price
+        price_fetcher = market_data.get_latest_price if self.api_client is not None else self.broker.get_price
         prices: dict[str, float] = {}
         for symbol in self.SYMBOLS:
             self._wait_for_rate_limit(f"price:{symbol}")
@@ -262,3 +304,30 @@ class TradingFlow(Flow):
         while not self.rate_limiter.allow(key):
             print(f"[data] Rate limit reached for {key}; sleeping 0.2s")
             time.sleep(0.2)
+
+    def _parse_backtest_start(self) -> date:
+        raw = os.getenv("BACKTEST_START", "").strip()
+        if not raw:
+            raise ValueError("BACKTEST_START is required when BACKTEST=1 (format YYYY-MM-DD)")
+        try:
+            return date.fromisoformat(raw)
+        except ValueError as exc:
+            raise ValueError(f"Invalid BACKTEST_START '{raw}', expected YYYY-MM-DD") from exc
+
+    @staticmethod
+    def _read_int_env(name: str, default: int, minimum: int) -> int:
+        raw = os.getenv(name, str(default)).strip()
+        try:
+            value = int(raw)
+        except ValueError:
+            value = default
+        return max(minimum, value)
+
+    @staticmethod
+    def _read_float_env(name: str, default: float, minimum: float) -> float:
+        raw = os.getenv(name, str(default)).strip()
+        try:
+            value = float(raw)
+        except ValueError:
+            value = default
+        return max(minimum, value)

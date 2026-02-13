@@ -16,7 +16,7 @@ def test_coordinator_holds_when_risk_veto_even_if_valuation_buy(monkeypatch) -> 
         run_mode="mock",
     )
     snapshot = MarketSnapshotModel(
-        timestamp=datetime.now(tz=timezone.utc).isoformat(),
+        timestamp=datetime(2025, 11, 3, 15, 0, tzinfo=timezone.utc).isoformat(),
         prices={"PLTR": 50.0},
         cash=1000.0,
         positions={"PLTR": 0},
@@ -36,7 +36,7 @@ def test_risk_force_veto_only_honored_in_mock(monkeypatch) -> None:
     monkeypatch.setenv("LLM_MODE", "stub")
     monkeypatch.setenv("RISK_FORCE_VETO", "market_closed")
     snapshot = MarketSnapshotModel(
-        timestamp=datetime.now(tz=timezone.utc).isoformat(),
+        timestamp=datetime(2025, 11, 3, 15, 0, tzinfo=timezone.utc).isoformat(),
         prices={"PLTR": 50.0},
         cash=1000.0,
         positions={"PLTR": 0},

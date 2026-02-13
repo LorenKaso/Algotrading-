@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from datetime import datetime, time, timezone
 from types import SimpleNamespace
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel
 
@@ -150,6 +152,7 @@ def risk_tool(
     valuation: DecisionModel,
     allowlist: set[str],
     market_is_open: bool | None,
+    max_shares_per_symbol: int,
     forced_veto: str | None = None,
 ) -> RiskResult:
     if forced_veto == "market_closed":
@@ -159,7 +162,9 @@ def risk_tool(
     if forced_veto == "insufficient_cash":
         return RiskResult(status="VETO", reason="insufficient cash")
 
-    if market_is_open is False:
+    _ = market_is_open
+    snapshot_ts = _parse_snapshot_timestamp(snapshot.timestamp)
+    if not _is_market_open_at(snapshot_ts):
         return RiskResult(status="VETO", reason="market closed")
 
     proposed = valuation if valuation.action in {"BUY", "SELL"} else market
@@ -169,6 +174,9 @@ def risk_tool(
         return RiskResult(status="VETO", reason="symbol not allowed")
 
     if action == "BUY" and symbol is not None:
+        current_qty = int(snapshot.positions.get(symbol, 0))
+        if current_qty >= max_shares_per_symbol:
+            return RiskResult(status="VETO", reason="position limit reached")
         price = snapshot.prices.get(symbol)
         if price is None or price <= 0:
             return RiskResult(status="VETO", reason="insufficient cash")
@@ -176,6 +184,24 @@ def risk_tool(
             return RiskResult(status="VETO", reason="insufficient cash")
 
     return RiskResult(status="APPROVE", reason="checks passed")
+
+
+def _parse_snapshot_timestamp(raw_timestamp: str) -> datetime:
+    text = raw_timestamp.strip().replace("Z", "+00:00")
+    parsed = datetime.fromisoformat(text)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _is_market_open_at(ts: datetime) -> bool:
+    ny_ts = ts.astimezone(ZoneInfo("America/New_York"))
+    if ny_ts.weekday() >= 5:
+        return False
+    market_open = time(hour=9, minute=30)
+    market_close = time(hour=16, minute=0)
+    current = ny_ts.time()
+    return market_open <= current <= market_close
 
 
 def coordinate_tool(
@@ -232,6 +258,7 @@ class DeterministicTradingCrew:
         symbols: list[str],
         allowlist: set[str],
         market_is_open: bool | None,
+        max_shares_per_symbol: int,
         forced_veto: str | None,
     ) -> None:
         self.agents = agents
@@ -239,6 +266,7 @@ class DeterministicTradingCrew:
         self._symbols = symbols
         self._allowlist = allowlist
         self._market_is_open = market_is_open
+        self._max_shares_per_symbol = max_shares_per_symbol
         self._forced_veto = forced_veto
         self._market_state: dict[str, float] = {}
 
@@ -261,6 +289,7 @@ class DeterministicTradingCrew:
             valuation=valuation_out,
             allowlist=self._allowlist,
             market_is_open=self._market_is_open,
+            max_shares_per_symbol=self._max_shares_per_symbol,
             forced_veto=self._forced_veto,
         )
         self.tasks[2].output = _TaskOutput(pydantic=risk_out)
@@ -341,8 +370,9 @@ def build_trading_crew(
         description=(
             "Apply gatekeeper checks and produce ONLY a RiskResult JSON/pydantic output. "
             "Rules: market closed => VETO('market closed'); chosen symbol not allowed => "
-            "VETO('symbol not allowed'); proposed BUY without enough cash for 1 share => "
-            "VETO('insufficient cash'); otherwise APPROVE('checks passed')."
+            "VETO('symbol not allowed'); proposed BUY when positions[symbol] >= "
+            "RISK_MAX_SHARES => VETO('position limit reached'); proposed BUY without enough "
+            "cash for 1 share => VETO('insufficient cash'); otherwise APPROVE('checks passed')."
         ),
         expected_output="RiskResult",
         agent=risk_agent,
@@ -366,6 +396,14 @@ def build_trading_crew(
     tasks = [task_market, task_valuation, task_risk, task_coord]
 
     llm_mode = os.getenv("LLM_MODE", "stub").strip().lower() or "stub"
+    max_shares_raw = os.getenv("RISK_MAX_SHARES", "5").strip()
+    try:
+        max_shares_per_symbol = int(max_shares_raw)
+    except ValueError:
+        max_shares_per_symbol = 5
+    if max_shares_per_symbol < 1:
+        max_shares_per_symbol = 1
+
     risk_force_veto = None
     if run_mode == "mock":
         raw_force = os.getenv("RISK_FORCE_VETO", "").strip().lower()
@@ -378,6 +416,7 @@ def build_trading_crew(
             symbols=symbols,
             allowlist=allowlist,
             market_is_open=market_is_open,
+            max_shares_per_symbol=max_shares_per_symbol,
             forced_veto=risk_force_veto,
         )
 
