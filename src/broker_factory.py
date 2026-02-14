@@ -13,6 +13,7 @@ def make_broker() -> Broker:
 
     try:
         from src.alpaca_broker import AlpacaBroker
+
         return AlpacaBroker()
     except Exception:
         return MockBroker()

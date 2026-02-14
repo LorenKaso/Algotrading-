@@ -78,6 +78,9 @@ class MockBroker(Broker):
     def has_open_order(self, symbol: str, side: str) -> bool:
         return any(self.list_open_orders(symbol=symbol, side=side))
 
+    def is_market_open(self) -> bool:
+        return True
+
     def seed_open_order(self, symbol: str, side: str) -> None:
         self._validate_symbol(symbol)
         if side not in {"buy", "sell"}:

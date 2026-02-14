@@ -10,7 +10,10 @@ from src.tools import FairValueTool
 _MARKET_PRICE_CACHE: dict[str, float] = {}
 
 
-def _normalize_symbols(symbols: list[str] | None, snapshot: MarketSnapshot) -> list[str]:
+def _normalize_symbols(
+    symbols: list[str] | None,
+    snapshot: MarketSnapshot,
+) -> list[str]:
     if symbols is None:
         symbols = list(snapshot.prices.keys())
     return [symbol.upper() for symbol in symbols]
@@ -103,16 +106,27 @@ class ValuationAgent:
                 action=TradeAction.BUY,
                 symbol=best_buy[0],
                 qty=1,
-                reason=f"score={best_buy[1]:.3f}, fair={fair:.2f}, price={best_buy[2]:.2f}",
+                reason=(
+                    f"score={best_buy[1]:.3f}, "
+                    f"fair={fair:.2f}, "
+                    f"price={best_buy[2]:.2f}"
+                ),
             )
-
-        if best_sell is not None and best_sell[1] <= -0.03 and snapshot.positions.get(best_sell[0], 0) > 0:
+        if (
+            best_sell is not None
+            and best_sell[1] <= -0.03
+            and snapshot.positions.get(best_sell[0], 0) > 0
+        ):
             fair = FAIR_VALUES[best_sell[0]]
             return Decision(
                 action=TradeAction.SELL,
                 symbol=best_sell[0],
                 qty=1,
-                reason=f"score={best_sell[1]:.3f}, fair={fair:.2f}, price={best_sell[2]:.2f}",
+                reason=(
+                    f"score={best_sell[1]:.3f}, "
+                    f"fair={fair:.2f}, "
+                    f"price={best_sell[2]:.2f}"
+                ),
             )
 
         return Decision(
@@ -131,21 +145,35 @@ class RiskAgent:
         market_is_open: bool | None = None,
     ) -> None:
         self._symbols = symbols
-        self._allowed_symbols = {symbol.upper() for symbol in (allowed_symbols or set(symbols))}
+        self._allowed_symbols = {
+            symbol.upper() for symbol in (allowed_symbols or set(symbols))
+        }
         self._market_is_open = market_is_open
 
     def decide(self, snapshot: MarketSnapshot) -> Decision:
         if self._market_is_open is False:
             return Decision(TradeAction.HOLD, None, 0, "VETO: market closed")
+        if not self._symbols:
+            return Decision(TradeAction.HOLD, None, 0, "APPROVE: risk checks passed")
 
         for symbol in self._symbols:
             if symbol not in self._allowed_symbols:
-                return Decision(TradeAction.HOLD, None, 0, f"VETO: symbol not allowed ({symbol})")
+                return Decision(
+                    TradeAction.HOLD,
+                    None,
+                    0,
+                    f"VETO: symbol not allowed ({symbol})",
+                )
             price = snapshot.prices.get(symbol)
             if price is None or price <= 0:
-                return Decision(TradeAction.HOLD, None, 0, f"VETO: price missing for {symbol}")
+                return Decision(
+                    TradeAction.HOLD,
+                    None,
+                    0,
+                    f"VETO: price missing for {symbol}",
+                )
 
-        minimum_price = min(snapshot.prices[symbol] for symbol in self._symbols if symbol in snapshot.prices)
+        minimum_price = min(snapshot.prices[symbol] for symbol in self._symbols)
         if snapshot.cash < minimum_price:
             return Decision(TradeAction.HOLD, None, 0, "VETO: cash too low")
 
@@ -165,9 +193,16 @@ class CoordinatorAgent:
 
     def decide(self, snapshot: MarketSnapshot) -> Decision:
         _ = snapshot
+        market_text = (
+            f"{self._market_decision.action.value}:" f"{self._market_decision.reason}"
+        )
+        valuation_text = (
+            f"{self._valuation_decision.action.value}:"
+            f"{self._valuation_decision.reason}"
+        )
         merged = (
-            f"market={self._market_decision.action.value}:{self._market_decision.reason} | "
-            f"valuation={self._valuation_decision.action.value}:{self._valuation_decision.reason} | "
+            f"market={market_text} | "
+            f"valuation={valuation_text} | "
             f"risk={self._risk_decision.reason}"
         )
         if self._risk_decision.reason.upper().startswith("VETO"):

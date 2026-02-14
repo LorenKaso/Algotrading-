@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from src.crew_decider import CoordinatorAgent, MarketAgent, RiskAgent, ValuationAgent, decide
+from src.crew_decider import (
+    CoordinatorAgent,
+    MarketAgent,
+    RiskAgent,
+    ValuationAgent,
+    decide,
+)
 from src.decision_types import Decision, TradeAction
 from src.market_snapshot import MarketSnapshot
 

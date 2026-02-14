@@ -26,7 +26,9 @@ def test_trading_flow_runs_one_iteration_and_calls_executor(monkeypatch) -> None
     monkeypatch.setattr("src.trading_flow.make_broker", lambda: _DummyBroker())
     monkeypatch.setattr(
         "src.trading_flow.execute_action",
-        lambda api_client, snapshot, decision: calls.append((api_client, snapshot, decision)),
+        lambda api_client, snapshot, decision: calls.append(
+            (api_client, snapshot, decision)
+        ),
     )
 
     flow = TradingFlow(max_iterations=1, sleep_fn=lambda _seconds: None)

@@ -9,7 +9,7 @@ from src.decision_types import Decision, TradeAction
 from src.market_snapshot import MarketSnapshot
 from src.portfolio import get_last_sell_ts, record_sell_fill, reset_portfolio_state
 from src.rate_limiter import RateLimiter
-from src.strategy_config import SELL_COOLDOWN_MIN
+from src.strategy_config import get_sell_cooldown_min as read_sell_cooldown_min
 
 _rate_limiter: RateLimiter | None = None
 _last_order_by_symbol_side: dict[tuple[str, TradeAction], tuple[float, float]] = {}
@@ -45,7 +45,9 @@ def execute_action(api_client, snapshot: MarketSnapshot, action: Decision) -> No
     side = action.action.value.lower()
     latest_price = float(snapshot.prices.get(symbol, 0.0))
 
-    if limits.enable_open_order_guard and _has_open_order(api_client, symbol=symbol, side=side):
+    if limits.enable_open_order_guard and _has_open_order(
+        api_client, symbol=symbol, side=side
+    ):
         print(f"[executor] SKIP: open order exists for {symbol} {action.action.value}")
         return
 
@@ -69,7 +71,9 @@ def execute_action(api_client, snapshot: MarketSnapshot, action: Decision) -> No
             bypass_pct=limits.price_move_bypass_pct,
         ):
             return
-        qty = _apply_position_cap(snapshot, symbol, latest_price, qty, limits.max_position_percent)
+        qty = _apply_position_cap(
+            snapshot, symbol, latest_price, qty, limits.max_position_percent
+        )
         if qty < 1:
             print("[executor] SKIP: position cap reached")
             return
@@ -117,7 +121,12 @@ def execute_action(api_client, snapshot: MarketSnapshot, action: Decision) -> No
         order_status = getattr(order, "status", "unknown")
         print(f"[executor] ORDER SENT: id={order_id}, status={order_status}")
         if action.action == TradeAction.SELL:
-            record_sell_fill(symbol, datetime.now(tz=timezone.utc))
+            fill_ts = _resolve_sell_fill_timestamp(
+                api_client=api_client,
+                order=order,
+                fallback_ts=datetime.now(tz=timezone.utc),
+            )
+            record_sell_fill(symbol, fill_ts)
     except Exception as exc:
         print(f"[executor] ERROR: order submission failed: {exc}")
 
@@ -133,7 +142,6 @@ def _wait_for_rate_limit(key: str) -> None:
 def _read_limits() -> ExecutorLimits:
     max_position_raw = os.getenv("MAX_POSITION_PERCENT", "20").strip()
     max_shares_raw = os.getenv("MAX_SHARES_PER_TRADE", "10").strip()
-    sell_cooldown_raw = os.getenv("SELL_COOLDOWN_MIN", str(SELL_COOLDOWN_MIN)).strip()
     cooldown_raw = os.getenv("BUY_COOLDOWN_SECONDS", "60").strip()
     bypass_raw = os.getenv("PRICE_MOVE_BYPASS_PCT", "1.0").strip()
     open_guard_raw = os.getenv("ENABLE_OPEN_ORDER_GUARD", "1").strip()
@@ -152,12 +160,7 @@ def _read_limits() -> ExecutorLimits:
     if max_shares_per_trade <= 0:
         max_shares_per_trade = 1
 
-    try:
-        sell_cooldown_min = int(sell_cooldown_raw)
-    except ValueError:
-        sell_cooldown_min = SELL_COOLDOWN_MIN
-    if sell_cooldown_min < 0:
-        sell_cooldown_min = 0
+    sell_cooldown_min = read_sell_cooldown_min()
 
     try:
         buy_cooldown_seconds = float(cooldown_raw)
@@ -235,11 +238,15 @@ def _is_buy_in_cooldown(
     if (now - last_trade_time) >= cooldown_seconds:
         return False
     if last_trade_price <= 0:
-        print(f"[executor] SKIP: BUY cooldown active for {symbol} (no significant price move)")
+        print(
+            f"[executor] SKIP: BUY cooldown active for {symbol} (no significant price move)"
+        )
         return True
     move_pct = abs(latest_price - last_trade_price) / last_trade_price * 100.0
     if move_pct < bypass_pct:
-        print(f"[executor] SKIP: BUY cooldown active for {symbol} (no significant price move)")
+        print(
+            f"[executor] SKIP: BUY cooldown active for {symbol} (no significant price move)"
+        )
         return True
     print(f"[executor] BYPASS: cooldown bypassed due to price move for {symbol}")
     return False
@@ -288,7 +295,14 @@ def _has_open_order(api_client, symbol: str, side: str) -> bool:
         order_status = str(getattr(order, "status", "")).lower()
         if order_symbol != symbol or order_side != side:
             continue
-        if order_status in {"", "open", "new", "accepted", "partially_filled", "pending_new"}:
+        if order_status in {
+            "",
+            "open",
+            "new",
+            "accepted",
+            "partially_filled",
+            "pending_new",
+        }:
             return True
     return False
 
@@ -324,6 +338,41 @@ def _to_utc(ts: datetime) -> datetime:
     if ts.tzinfo is None:
         return ts.replace(tzinfo=timezone.utc)
     return ts.astimezone(timezone.utc)
+
+
+def _resolve_sell_fill_timestamp(api_client, order, fallback_ts: datetime) -> datetime:
+    direct_fill = _parse_datetime(getattr(order, "filled_at", None))
+    if direct_fill is not None:
+        return direct_fill
+
+    order_id = getattr(order, "id", None)
+    if order_id is None or not hasattr(api_client, "get_order"):
+        return fallback_ts
+
+    for _ in range(3):
+        try:
+            latest = api_client.get_order(order_id)
+        except Exception:
+            return fallback_ts
+        status = str(getattr(latest, "status", "unknown"))
+        print(f"[executor] ORDER STATUS: id={order_id}, status={status}")
+        filled_at = _parse_datetime(getattr(latest, "filled_at", None))
+        if status.lower() == "filled":
+            return filled_at or datetime.now(tz=timezone.utc)
+        time.sleep(1.0)
+    return fallback_ts
+
+
+def _parse_datetime(value) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return _to_utc(value)
+    try:
+        text = str(value).replace("Z", "+00:00")
+        return _to_utc(datetime.fromisoformat(text))
+    except Exception:
+        return None
 
 
 def reset_executor_state() -> None:

@@ -4,10 +4,14 @@ import os
 import sys
 
 from dotenv import load_dotenv
+
 try:
     from alpaca_trade_api.rest import REST
+
     _ALPACA_IMPORT_ERROR: Exception | None = None
-except Exception as exc:  # pragma: no cover - exercised in environments without alpaca package
+except (
+    Exception
+) as exc:  # pragma: no cover - exercised in environments without alpaca package
     REST = object  # type: ignore[assignment]
     _ALPACA_IMPORT_ERROR = exc
 

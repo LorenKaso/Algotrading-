@@ -10,8 +10,11 @@ from pathlib import Path
 
 try:
     from alpaca_trade_api.rest import REST
+
     _ALPACA_IMPORT_ERROR: Exception | None = None
-except Exception as exc:  # pragma: no cover - exercised in environments without alpaca package
+except (
+    Exception
+) as exc:  # pragma: no cover - exercised in environments without alpaca package
     REST = object  # type: ignore[assignment]
     _ALPACA_IMPORT_ERROR = exc
 
@@ -87,9 +90,7 @@ def get_latest_price(symbol: str) -> float:
         print(f"[market_data] Latest bar close for {clean_symbol}: {bar_price}")
         return bar_price
     except Exception as bar_exc:
-        message = (
-            f"Could not fetch latest price for {clean_symbol} via trade or bar API: {bar_exc}"
-        )
+        message = f"Could not fetch latest price for {clean_symbol} via trade or bar API: {bar_exc}"
         print(f"[market_data] ERROR: {message}", file=sys.stderr)
         raise RuntimeError(message) from bar_exc
 
@@ -107,7 +108,9 @@ def get_price_at(symbol: str, ts: datetime) -> float:
 
     step_min = _read_step_minutes()
     timeframe = _select_timeframe(step_min)
-    start_ts = (target_ts - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
+    start_ts = (target_ts - timedelta(days=7)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
     end_ts = target_ts.replace(hour=23, minute=59, second=59, microsecond=0)
     bars = _get_historical_bars(clean_symbol, timeframe, start_ts, end_ts)
     closes = [close for bar_ts, close in bars if bar_ts <= target_ts]
@@ -119,7 +122,9 @@ def get_price_at(symbol: str, ts: datetime) -> float:
         print(f"[market_data] ERROR: {message}", file=sys.stderr)
         raise RuntimeError(message)
     price = closes[-1]
-    print(f"[market_data] Historical close for {clean_symbol} at {target_ts.isoformat()}: {price}")
+    print(
+        f"[market_data] Historical close for {clean_symbol} at {target_ts.isoformat()}: {price}"
+    )
     return price
 
 

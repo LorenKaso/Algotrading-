@@ -26,7 +26,9 @@ def test_sell_skips_when_no_position(monkeypatch, capsys) -> None:
         cash=1000.0,
         positions={"PLTK": 0},
     )
-    action = Decision(action=TradeAction.SELL, symbol="PLTK", qty=1, reason="take profit hit")
+    action = Decision(
+        action=TradeAction.SELL, symbol="PLTK", qty=1, reason="take profit hit"
+    )
 
     execute_action(api, snapshot, action)
 

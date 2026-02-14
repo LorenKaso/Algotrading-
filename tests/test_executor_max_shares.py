@@ -31,7 +31,9 @@ def test_max_shares_per_trade_reduces_qty(monkeypatch, capsys) -> None:
     )
 
     output = capsys.readouterr().out
-    assert "ADJUST: qty reduced from 9 to 3 for PLTR due to max shares per trade" in output
+    assert (
+        "ADJUST: qty reduced from 9 to 3 for PLTR due to max shares per trade" in output
+    )
     assert "DRY-RUN: would BUY 3 of PLTR" in output
 
 

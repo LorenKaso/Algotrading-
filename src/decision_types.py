@@ -16,3 +16,4 @@ class Decision:
     symbol: str | None
     qty: int
     reason: str
+    confidence: float = 0.5

@@ -30,7 +30,9 @@ def run_backtest(
     sells = 0
     last_prices = {symbol: 0.0 for symbol in clean_symbols}
 
-    timestamps = _generate_timestamps(start_date, days=max(1, days), step_min=max(1, step_min))
+    timestamps = _generate_timestamps(
+        start_date, days=max(1, days), step_min=max(1, step_min)
+    )
     print(
         "[backtest] Starting simulation start=%s days=%d step_min=%d symbols=%s initial_cash=%.2f"
         % (start_date.isoformat(), days, step_min, clean_symbols, cash)
@@ -73,11 +75,16 @@ def run_backtest(
         risk_out = _risk_from_task(crew, 2, "risk output missing")
         final_out = _decision_from_task(crew, 3, "coord output missing")
 
-        print(f"[agent][market] {market_out.action} {market_out.symbol} ({market_out.reason})")
-        print(f"[agent][valuation] {valuation_out.action} {valuation_out.symbol} ({valuation_out.reason})")
+        print(
+            f"[agent][market] {market_out.action} {market_out.symbol} ({market_out.reason})"
+        )
+        print(
+            f"[agent][valuation] {valuation_out.action} {valuation_out.symbol} ({valuation_out.reason})"
+        )
         print(f"[agent][risk] {risk_out.status}: {risk_out.reason}")
         print(
             f"[agent][coord] final={final_out.action} {final_out.symbol} "
+            f"confidence={final_out.confidence:.2f} "
             f"({final_out.reason}) (risk={risk_out.status}:{risk_out.reason})"
         )
         print(
@@ -107,7 +114,9 @@ def run_backtest(
                         positions[symbol] = current_qty + 1
                         new_qty = positions[symbol]
                         total_cost = current_avg * current_qty + price
-                        avg_entry_prices[symbol] = total_cost / new_qty if new_qty > 0 else 0.0
+                        avg_entry_prices[symbol] = (
+                            total_cost / new_qty if new_qty > 0 else 0.0
+                        )
                         buys += 1
                         print(
                             f"[backtest][executor] FILL BUY {symbol} qty=1 at {price:.2f}; "
@@ -142,13 +151,17 @@ def run_backtest(
         else:
             print("[backtest][executor] HOLD")
 
-        portfolio_value = cash + sum(positions[symbol] * prices[symbol] for symbol in clean_symbols)
+        portfolio_value = cash + sum(
+            positions[symbol] * prices[symbol] for symbol in clean_symbols
+        )
         print(
             "[backtest] portfolio_value=%.2f cash=%.2f positions=%s"
             % (portfolio_value, cash, positions)
         )
 
-    end_value = cash + sum(positions[symbol] * last_prices.get(symbol, 0.0) for symbol in clean_symbols)
+    end_value = cash + sum(
+        positions[symbol] * last_prices.get(symbol, 0.0) for symbol in clean_symbols
+    )
     report = {
         "start_cash": float(initial_cash),
         "end_value": float(end_value),
@@ -161,7 +174,10 @@ def run_backtest(
     print("[backtest][summary] start_cash=%.2f" % report["start_cash"])
     print("[backtest][summary] end_value=%.2f" % report["end_value"])
     print("[backtest][summary] pnl=%.2f" % report["pnl"])
-    print("[backtest][summary] buys=%d sells=%d" % (report["num_buys"], report["num_sells"]))
+    print(
+        "[backtest][summary] buys=%d sells=%d"
+        % (report["num_buys"], report["num_sells"])
+    )
     print("[backtest][summary] final_positions=%s" % report["final_positions"])
     print("[backtest][summary] steps=%d" % report["steps"])
     return report
@@ -203,8 +219,12 @@ def _generate_timestamps(start_date: date, days: int, step_min: int) -> list[dat
     timestamps: list[datetime] = []
     trading_days = _trading_days(start_date, days)
     for trading_day in trading_days:
-        session_start = datetime.combine(trading_day, time(hour=14, minute=30), tzinfo=timezone.utc)
-        session_end = datetime.combine(trading_day, time(hour=21, minute=0), tzinfo=timezone.utc)
+        session_start = datetime.combine(
+            trading_day, time(hour=14, minute=30), tzinfo=timezone.utc
+        )
+        session_end = datetime.combine(
+            trading_day, time(hour=21, minute=0), tzinfo=timezone.utc
+        )
         current = session_start
         while current <= session_end:
             timestamps.append(current)

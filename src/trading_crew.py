@@ -9,14 +9,26 @@ from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel
 
-from src.crewai_models import DecisionModel, MarketSnapshotModel, PositionInsight, RiskResult
-from src.strategy_config import STOP_LOSS_PCT, TAKE_PROFIT_PCT
+from src.crewai_models import (
+    DecisionModel,
+    MarketSnapshotModel,
+    PositionInsight,
+    RiskResult,
+)
+from src.portfolio import get_last_sell_ts
+from src.strategy_config import (
+    STOP_LOSS_PCT,
+    TAKE_PROFIT_PCT,
+    get_risk_max_shares,
+    get_sell_cooldown_min,
+)
 from src.strategy_buffett_lite import FAIR_VALUES
 from src.tools import FairValueTool
 from src.tools.strategy_tool import compute_position_insight
 
 try:
     from crewai import Agent, Crew, Task
+
     _CREWAI_AVAILABLE = True
 except Exception:  # pragma: no cover - exercised in environments without crewai
     _CREWAI_AVAILABLE = False
@@ -73,7 +85,9 @@ except Exception:  # pragma: no cover - exercised in environments without crewai
 
         def kickoff(self, inputs: dict[str, Any] | None = None):
             _ = inputs
-            raise RuntimeError("Fallback Crew cannot execute without deterministic mode")
+            raise RuntimeError(
+                "Fallback Crew cannot execute without deterministic mode"
+            )
 
 
 @dataclass
@@ -85,7 +99,9 @@ class _TaskOutput:
         return self.pydantic.model_dump()
 
 
-def momentum_tool(snapshot: MarketSnapshotModel, state: dict[str, float]) -> DecisionModel:
+def momentum_tool(
+    snapshot: MarketSnapshotModel, state: dict[str, float]
+) -> DecisionModel:
     best_symbol: str | None = None
     best_change = float("-inf")
     for symbol, price in snapshot.prices.items():
@@ -100,23 +116,41 @@ def momentum_tool(snapshot: MarketSnapshotModel, state: dict[str, float]) -> Dec
         state[symbol] = price
 
     if best_symbol is None:
-        return DecisionModel(action="HOLD", symbol=None, reason="market: no momentum signal")
+        return DecisionModel(
+            action="HOLD",
+            symbol=None,
+            reason="market: no momentum signal",
+            confidence=0.45,
+        )
+    momentum_confidence = min(0.4 + abs(best_change) * 20.0, 0.85)
     if best_change >= 0.01:
         return DecisionModel(
             action="BUY",
             symbol=best_symbol,
             reason=f"market: momentum up {best_change * 100:.2f}%",
+            confidence=momentum_confidence,
         )
     if best_change <= -0.01 and snapshot.positions.get(best_symbol, 0) > 0:
         return DecisionModel(
             action="SELL",
             symbol=best_symbol,
             reason=f"market: momentum down {abs(best_change) * 100:.2f}%",
+            confidence=momentum_confidence,
         )
-    return DecisionModel(action="HOLD", symbol=None, reason="market: momentum neutral")
+    neutral_confidence = max(0.4, min(0.55, momentum_confidence))
+    return DecisionModel(
+        action="HOLD",
+        symbol=None,
+        reason="market: momentum neutral",
+        confidence=neutral_confidence,
+    )
 
 
-def valuation_tool(snapshot: MarketSnapshotModel, symbols: list[str]) -> DecisionModel:
+def valuation_tool(
+    snapshot: MarketSnapshotModel,
+    symbols: list[str],
+    max_shares_per_symbol: int,
+) -> DecisionModel:
     for symbol in symbols:
         qty = int(snapshot.positions.get(symbol, 0))
         price = snapshot.prices.get(symbol)
@@ -130,15 +164,21 @@ def valuation_tool(snapshot: MarketSnapshotModel, symbols: list[str]) -> Decisio
         pnl_pct_display = f"{insight.pnl_pct * 100:+.1f}%"
         if insight.pnl_pct >= TAKE_PROFIT_PCT:
             print(f"[strategy] {symbol} pnl={pnl_pct_display} take-profit triggered")
-            return DecisionModel(action="SELL", symbol=symbol, reason="take profit hit")
+            return DecisionModel(
+                action="SELL", symbol=symbol, reason="take profit hit", confidence=0.9
+            )
         if insight.pnl_pct <= STOP_LOSS_PCT:
             print(f"[strategy] {symbol} pnl={pnl_pct_display} stop-loss triggered")
-            return DecisionModel(action="SELL", symbol=symbol, reason="stop loss hit")
+            return DecisionModel(
+                action="SELL", symbol=symbol, reason="stop loss hit", confidence=0.85
+            )
 
     fair_value_tool = FairValueTool()
     best_buy: tuple[str, float, float] | None = None
     best_sell: tuple[str, float, float] | None = None
     for symbol in symbols:
+        if int(snapshot.positions.get(symbol, 0)) >= max_shares_per_symbol:
+            continue
         price = snapshot.prices.get(symbol)
         fair = FAIR_VALUES.get(symbol)
         if fair is None or price is None or price <= 0:
@@ -151,19 +191,32 @@ def valuation_tool(snapshot: MarketSnapshotModel, symbols: list[str]) -> Decisio
 
     if best_buy and best_buy[1] >= 0.03:
         fair = FAIR_VALUES[best_buy[0]]
+        confidence = min(0.5 + max(best_buy[1] - 0.03, 0.0) * 5.0, 0.9)
         return DecisionModel(
             action="BUY",
             symbol=best_buy[0],
             reason=f"valuation: score={best_buy[1]:.3f}, fair={fair:.2f}, price={best_buy[2]:.2f}",
+            confidence=confidence,
         )
-    if best_sell and best_sell[1] <= -0.03 and snapshot.positions.get(best_sell[0], 0) > 0:
+    if (
+        best_sell
+        and best_sell[1] <= -0.03
+        and snapshot.positions.get(best_sell[0], 0) > 0
+    ):
         fair = FAIR_VALUES[best_sell[0]]
+        confidence = min(0.6 + max(abs(best_sell[1]) - 0.03, 0.0) * 3.0, 0.85)
         return DecisionModel(
             action="SELL",
             symbol=best_sell[0],
             reason=f"valuation: score={best_sell[1]:.3f}, fair={fair:.2f}, price={best_sell[2]:.2f}",
+            confidence=confidence,
         )
-    return DecisionModel(action="HOLD", symbol=None, reason="valuation: no actionable signal")
+    return DecisionModel(
+        action="HOLD",
+        symbol=None,
+        reason="valuation: no actionable signal",
+        confidence=0.5,
+    )
 
 
 def risk_tool(
@@ -176,34 +229,39 @@ def risk_tool(
     forced_veto: str | None = None,
 ) -> RiskResult:
     if forced_veto == "market_closed":
-        return RiskResult(status="VETO", reason="market closed")
+        return RiskResult(status="VETO", reason="market closed", confidence=1.0)
     if forced_veto == "symbol_not_allowed":
-        return RiskResult(status="VETO", reason="symbol not allowed")
+        return RiskResult(status="VETO", reason="symbol not allowed", confidence=1.0)
     if forced_veto == "insufficient_cash":
-        return RiskResult(status="VETO", reason="insufficient cash")
+        return RiskResult(status="VETO", reason="insufficient cash", confidence=1.0)
 
-    _ = market_is_open
-    snapshot_ts = _parse_snapshot_timestamp(snapshot.timestamp)
-    if not _is_market_open_at(snapshot_ts):
-        return RiskResult(status="VETO", reason="market closed")
+    if market_is_open is not None:
+        if not market_is_open:
+            return RiskResult(status="VETO", reason="market closed", confidence=1.0)
+    else:
+        snapshot_ts = _parse_snapshot_timestamp(snapshot.timestamp)
+        if not _is_market_open_at(snapshot_ts):
+            return RiskResult(status="VETO", reason="market closed", confidence=1.0)
 
     proposed = valuation if valuation.action in {"BUY", "SELL"} else market
     symbol = (proposed.symbol or "").upper() if proposed.symbol else None
     action = proposed.action
     if symbol is not None and symbol not in allowlist:
-        return RiskResult(status="VETO", reason="symbol not allowed")
+        return RiskResult(status="VETO", reason="symbol not allowed", confidence=1.0)
 
     if action == "BUY" and symbol is not None:
         current_qty = int(snapshot.positions.get(symbol, 0))
         if current_qty >= max_shares_per_symbol:
-            return RiskResult(status="VETO", reason="position limit reached")
+            return RiskResult(
+                status="VETO", reason="position limit reached", confidence=1.0
+            )
         price = snapshot.prices.get(symbol)
         if price is None or price <= 0:
-            return RiskResult(status="VETO", reason="insufficient cash")
+            return RiskResult(status="VETO", reason="insufficient cash", confidence=1.0)
         if snapshot.cash < price:
-            return RiskResult(status="VETO", reason="insufficient cash")
+            return RiskResult(status="VETO", reason="insufficient cash", confidence=1.0)
 
-    return RiskResult(status="APPROVE", reason="checks passed")
+    return RiskResult(status="APPROVE", reason="checks passed", confidence=0.7)
 
 
 def _parse_snapshot_timestamp(raw_timestamp: str) -> datetime:
@@ -224,12 +282,52 @@ def _is_market_open_at(ts: datetime) -> bool:
     return market_open <= current <= market_close
 
 
+def _clamp_confidence(value: float | None) -> float:
+    if value is None:
+        return 0.5
+    return max(0.0, min(1.0, float(value)))
+
+
+def _weighted_confidence(
+    market_conf: float, valuation_conf: float, risk_conf: float
+) -> float:
+    return 0.30 * market_conf + 0.45 * valuation_conf + 0.25 * risk_conf
+
+
+def _apply_buy_cooldown_confidence(
+    symbol: str | None,
+    snapshot_ts: str,
+    valuation_confidence: float,
+) -> float:
+    if symbol is None:
+        return valuation_confidence
+    last_sell_ts = get_last_sell_ts(symbol)
+    if last_sell_ts is None:
+        return valuation_confidence
+    snapshot_dt = _parse_snapshot_timestamp(snapshot_ts)
+    elapsed_min = (snapshot_dt - last_sell_ts).total_seconds() / 60.0
+    cooldown_min = get_sell_cooldown_min()
+    if elapsed_min < cooldown_min:
+        return min(valuation_confidence, 0.4)
+    return valuation_confidence
+
+
 def coordinate_tool(
+    snapshot: MarketSnapshotModel,
     market: DecisionModel,
     valuation: DecisionModel,
     risk: RiskResult,
 ) -> DecisionModel:
+    market_conf = _clamp_confidence(market.confidence)
+    valuation_conf = _clamp_confidence(valuation.confidence)
+    risk_conf = _clamp_confidence(risk.confidence)
+
     if risk.status == "VETO":
+        final_conf = _weighted_confidence(market_conf, valuation_conf, 1.0)
+        print(
+            f"[confidence] valuation={valuation_conf:.2f} market={market_conf:.2f} "
+            f"risk={1.00:.2f} final={final_conf:.2f}"
+        )
         return DecisionModel(
             action="HOLD",
             symbol=None,
@@ -238,14 +336,44 @@ def coordinate_tool(
                 f"market={market.action}:{market.reason} | "
                 f"valuation={valuation.action}:{valuation.reason}"
             ),
+            confidence=final_conf,
         )
+
+    effective_valuation_conf = valuation_conf
+    if valuation.action == "BUY":
+        effective_valuation_conf = _apply_buy_cooldown_confidence(
+            symbol=valuation.symbol,
+            snapshot_ts=snapshot.timestamp,
+            valuation_confidence=valuation_conf,
+        )
+    final_confidence = _weighted_confidence(
+        market_conf, effective_valuation_conf, risk_conf
+    )
+    print(
+        f"[confidence] valuation={effective_valuation_conf:.2f} market={market_conf:.2f} "
+        f"risk={risk_conf:.2f} final={final_confidence:.2f}"
+    )
+
     if valuation.action == "SELL":
         return DecisionModel(
             action="SELL",
             symbol=valuation.symbol,
             reason=valuation.reason,
+            confidence=final_confidence,
         )
     if valuation.action == "BUY":
+        if effective_valuation_conf < 0.6 or final_confidence < 0.65:
+            return DecisionModel(
+                action="HOLD",
+                symbol=None,
+                reason=(
+                    f"buy confidence too low | valuation_conf={effective_valuation_conf:.2f} "
+                    f"final_conf={final_confidence:.2f} | "
+                    f"market={market.action}:{market.reason} | "
+                    f"valuation={valuation.action}:{valuation.reason}"
+                ),
+                confidence=final_confidence,
+            )
         if market.action == "SELL":
             return DecisionModel(
                 action="HOLD",
@@ -255,11 +383,13 @@ def coordinate_tool(
                     f"market={market.action}:{market.reason} | "
                     f"valuation={valuation.action}:{valuation.reason}"
                 ),
+                confidence=final_confidence,
             )
         return DecisionModel(
             action="BUY",
             symbol=valuation.symbol,
             reason=valuation.reason,
+            confidence=final_confidence,
         )
     return DecisionModel(
         action="HOLD",
@@ -269,6 +399,7 @@ def coordinate_tool(
             f"market={market.action}:{market.reason} | "
             f"valuation={valuation.action}:{valuation.reason}"
         ),
+        confidence=final_confidence,
     )
 
 
@@ -296,12 +427,19 @@ class DeterministicTradingCrew:
         context = dict(inputs or {})
         snapshot_raw = context.get("snapshot")
         snapshot = MarketSnapshotModel.model_validate(snapshot_raw)
+        kickoff_market_is_open = context.get("market_is_open", self._market_is_open)
+        if not isinstance(kickoff_market_is_open, bool):
+            kickoff_market_is_open = None
 
         market_out = momentum_tool(snapshot, state=self._market_state)
         self.tasks[0].output = _TaskOutput(pydantic=market_out)
         context["market"] = self.tasks[0].output.json_dict
 
-        valuation_out = valuation_tool(snapshot, symbols=self._symbols)
+        valuation_out = valuation_tool(
+            snapshot,
+            symbols=self._symbols,
+            max_shares_per_symbol=self._max_shares_per_symbol,
+        )
         self.tasks[1].output = _TaskOutput(pydantic=valuation_out)
         context["valuation"] = self.tasks[1].output.json_dict
 
@@ -310,14 +448,14 @@ class DeterministicTradingCrew:
             market=market_out,
             valuation=valuation_out,
             allowlist=self._allowlist,
-            market_is_open=self._market_is_open,
+            market_is_open=kickoff_market_is_open,
             max_shares_per_symbol=self._max_shares_per_symbol,
             forced_veto=self._forced_veto,
         )
         self.tasks[2].output = _TaskOutput(pydantic=risk_out)
         context["risk"] = self.tasks[2].output.json_dict
 
-        coord_out = coordinate_tool(market_out, valuation_out, risk_out)
+        coord_out = coordinate_tool(snapshot, market_out, valuation_out, risk_out)
         self.tasks[3].output = _TaskOutput(pydantic=coord_out)
         context["coord"] = self.tasks[3].output.json_dict
         return SimpleNamespace(tasks=self.tasks, final=self.tasks[3].output)
@@ -369,8 +507,14 @@ def build_trading_crew(
     task_market = Task(
         name="task_market",
         description=(
+            "Inputs:\n"
+            "- snapshot: {snapshot}\n"
+            "- symbols: {symbols}\n"
+            "- market_is_open: {market_is_open}\n"
             "Use snapshot input and produce ONLY a DecisionModel JSON/pydantic output. "
-            "No prose. Action must be BUY, SELL, or HOLD."
+            "No prose. Action must be BUY, SELL, or HOLD. "
+            "You MUST choose symbol only from {symbols} (case-insensitive). "
+            "If no actionable signal, return HOLD with symbol=null."
         ),
         expected_output="DecisionModel",
         agent=market_agent,
@@ -379,8 +523,14 @@ def build_trading_crew(
     task_valuation = Task(
         name="task_valuation",
         description=(
+            "Inputs:\n"
+            "- snapshot: {snapshot}\n"
+            "- symbols: {symbols}\n"
+            "- market_is_open: {market_is_open}\n"
             "Use valuation + strategy exits and produce ONLY a DecisionModel JSON/pydantic output. "
-            "Rules include SELL exits on take-profit and stop-loss, else BUY/HOLD from valuation."
+            "Rules include SELL exits on take-profit and stop-loss, else BUY/HOLD from valuation. "
+            "You MUST choose symbol only from {symbols} (case-insensitive). "
+            "If no actionable signal, return HOLD with symbol=null."
         ),
         expected_output="DecisionModel",
         agent=valuation_agent,
@@ -390,9 +540,16 @@ def build_trading_crew(
     task_risk = Task(
         name="task_risk",
         description=(
+            "Inputs:\n"
+            "- snapshot: {snapshot}\n"
+            "- symbols: {symbols}\n"
+            "- market_is_open: {market_is_open}\n"
             "Apply gatekeeper checks and produce ONLY a RiskResult JSON/pydantic output. "
-            "Rules: market closed => VETO('market closed'); chosen symbol not allowed => "
-            "VETO('symbol not allowed'); proposed BUY when positions[symbol] >= "
+            "Rules: if {market_is_open} is False => VETO('market closed'); "
+            "if {market_is_open} is True => do NOT return market-closed veto; "
+            "if {market_is_open} is None => use snapshot timestamp market-hours fallback. "
+            "If proposed decision symbol is not in {symbols} => "
+            "VETO('symbol not allowed'). Proposed BUY when positions[symbol] >= "
             "RISK_MAX_SHARES => VETO('position limit reached'); proposed BUY without enough "
             "cash for 1 share => VETO('insufficient cash'); otherwise APPROVE('checks passed')."
         ),
@@ -404,12 +561,18 @@ def build_trading_crew(
     task_coord = Task(
         name="task_coord",
         description=(
+            "Inputs:\n"
+            "- snapshot: {snapshot}\n"
+            "- symbols: {symbols}\n"
+            "- market_is_open: {market_is_open}\n"
             "Combine prior decisions deterministically and produce ONLY DecisionModel. "
             "Inputs: Market DecisionModel, Valuation DecisionModel, RiskResult. "
             "Rules: if risk.status == VETO => HOLD with "
-            "\"risk veto: <risk.reason> | market=<...> | valuation=<...>\". "
+            '"risk veto: <risk.reason> | market=<...> | valuation=<...>". '
             "Else valuation SELL has priority. BUY only if valuation BUY and market is not SELL. "
-            "Otherwise HOLD."
+            "Use confidence-weighted aggregation and include confidence in output. "
+            "You MUST choose symbol only from {symbols} (case-insensitive). "
+            "If no actionable signal, return HOLD with symbol=null."
         ),
         expected_output="DecisionModel",
         agent=coordinator_agent,
@@ -419,13 +582,7 @@ def build_trading_crew(
     tasks = [task_market, task_valuation, task_risk, task_coord]
 
     llm_mode = os.getenv("LLM_MODE", "stub").strip().lower() or "stub"
-    max_shares_raw = os.getenv("RISK_MAX_SHARES", "5").strip()
-    try:
-        max_shares_per_symbol = int(max_shares_raw)
-    except ValueError:
-        max_shares_per_symbol = 5
-    if max_shares_per_symbol < 1:
-        max_shares_per_symbol = 1
+    max_shares_per_symbol = get_risk_max_shares()
 
     risk_force_veto = None
     if run_mode == "mock":

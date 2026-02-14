@@ -17,11 +17,13 @@ class DecisionModel(BaseModel):
     action: Literal["BUY", "SELL", "HOLD"]
     symbol: str | None = Field(default=None)
     reason: str
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
 
 
 class RiskResult(BaseModel):
     status: Literal["APPROVE", "VETO"]
     reason: str
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
 
 
 class PositionInsight(BaseModel):

@@ -55,7 +55,7 @@ class AlpacaBroker(Broker):
 
         for pos in positions_list:
             symbol = pos.symbol  # type: ignore[attr-defined]
-            qty = pos.qty        # type: ignore[attr-defined]
+            qty = pos.qty  # type: ignore[attr-defined]
             positions[symbol] = int(float(qty))
 
         return positions
@@ -109,19 +109,28 @@ class AlpacaBroker(Broker):
         request = GetOrdersRequest(
             status=QueryOrderStatus.OPEN,
             symbols=[symbol] if symbol else None,
-            side=OrderSide.BUY if side == "buy" else (OrderSide.SELL if side == "sell" else None),
+            side=(
+                OrderSide.BUY
+                if side == "buy"
+                else (OrderSide.SELL if side == "sell" else None)
+            ),
         )
         orders = self._trading.get_orders(filter=request)
         return [
             {
                 "symbol": str(order.symbol).upper(),  # type: ignore[attr-defined]
-                "side": str(order.side).lower(),      # type: ignore[attr-defined]
+                "side": str(order.side).lower(),  # type: ignore[attr-defined]
             }
             for order in orders
         ]
 
     def has_open_order(self, symbol: str, side: str) -> bool:
         return any(self.list_open_orders(symbol=symbol, side=side))
+
+    def is_market_open(self) -> bool:
+        self._check_rate_limit("alpaca:is_market_open")
+        clock = self._trading.get_clock()
+        return bool(clock.is_open)  # type: ignore[attr-defined]
 
     def _check_rate_limit(self, key: str) -> None:
         if self._rate_limiter is None:
