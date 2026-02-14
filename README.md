@@ -1,51 +1,59 @@
-# Trading Agent Quick Run Guide
+📈 CrewAI Multi-Agent Trading (Alpaca Paper Only)
+paper Trading Only
+This project uses Alpaca Paper Trading (no live trading).
+Required:
 
-## Required environment variables
+APCA_API_BASE_URL=https://paper-api.alpaca.markets
 
-- `RUN_MODE`: `mock` or `alpaca`
-- `EXECUTE`: `1` to send paper orders, `0` for dry-run decisions only
-- `BACKTEST`: `1` for historical simulation mode, otherwise realtime loop
-- `APCA_API_BASE_URL` (for `RUN_MODE=alpaca`): must be `https://paper-api.alpaca.markets`
 
-### Common optional variables
+On startup, connection is verified using get_account().
 
-- `RISK_MAX_SHARES` (default `5`)
-- `SELL_COOLDOWN_MIN` (default `120`)
-- `MAX_POSITION_PERCENT` (default `20`)
-- `MAX_SHARES_PER_TRADE` (default `10`)
-- `BUY_COOLDOWN_SECONDS` (default `60`)
+Successful connection prints:
 
-## Backtest mode
+[alpaca] SUCCESS: Connected. Account status=ACTIVE, equity=100000
 
-Run a finite historical simulation:
+🛡 Safety Mechanism
+Variable	Behavior
+EXECUTE=0	Decisions only (NO paper orders sent)
+EXECUTE=1	Orders sent to Alpaca paper account
 
-```bash
+Recommended default:
+
+EXECUTE=0
+
+🔧 Required Environment Variables
+RUN_MODE=alpaca
+EXECUTE=0 | 1
+BACKTEST=0 | 1
+LLM_MODE=real
+APCA_API_BASE_URL=https://paper-api.alpaca.markets
+
+▶️ Run – Safe Mode (No Orders)
+LLM_MODE=real RUN_MODE=alpaca EXECUTE=0 BACKTEST=0 python -m src.agent_trader
+
+Agents decide, but no trades are sent.
+
+▶️ Run – Paper Orders Enabled
+LLM_MODE=real RUN_MODE=alpaca EXECUTE=1 BACKTEST=0 python -m src.agent_trader
+
+Orders are sent to Alpaca paper account only.
+
+🧪 Backtest Mode
 RUN_MODE=alpaca BACKTEST=1 BACKTEST_START=2025-11-03 BACKTEST_DAYS=5 BACKTEST_STEP_MIN=60 python -m src.agent_trader
-```
 
-Backtest notes:
+No orders are submitted during backtest.
 
-- No Alpaca orders are submitted.
-- Logs use `[backtest]` and `[backtest][executor]`.
-- Summary prints with `[backtest][summary]`.
+🧠 CrewAI (Open Source)
 
-## Paper trading mode (Alpaca)
+The system runs 4 coordinated agents:
+Market
+Valuation
+Risk
+Coordinator
 
-Dry-run (decision-only, no paper orders):
+Snapshot + symbols + market status are passed to CrewAI.
+Risk agent may veto.
+Coordinator produces final decision.
 
-```bash
-RUN_MODE=alpaca EXECUTE=0 BACKTEST=0 python -m src.agent_trader
-```
-
-Active paper orders:
-
-```bash
-RUN_MODE=alpaca EXECUTE=1 BACKTEST=0 python -m src.agent_trader
-```
-
-Paper mode notes:
-
-- Uses Alpaca paper endpoint (`https://paper-api.alpaca.markets` via your env config).
-- With `EXECUTE=0`, the app logs a warning that Alpaca portfolio will not change.
-- Per tick, portfolio dashboard is printed and appended to:
-  - `runs/portfolio_timeseries.csv`
+🧪 Run Tests
+pytest -q
