@@ -10,12 +10,10 @@ from zoneinfo import ZoneInfo
 from pydantic import BaseModel
 
 from src.crewai_models import DecisionModel, MarketSnapshotModel, PositionInsight, RiskResult
+from src.strategy_config import STOP_LOSS_PCT, TAKE_PROFIT_PCT
 from src.strategy_buffett_lite import FAIR_VALUES
 from src.tools import FairValueTool
 from src.tools.strategy_tool import compute_position_insight
-
-TAKE_PROFIT_PCT = 0.05
-STOP_LOSS_PCT = -0.03
 
 try:
     from crewai import Agent, Crew, Task

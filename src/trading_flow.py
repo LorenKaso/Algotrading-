@@ -12,6 +12,7 @@ from src.crewai_models import DecisionModel, MarketSnapshotModel, RiskResult
 from src.decision_types import Decision, TradeAction
 import src.market_data as market_data
 from src.market_snapshot import MarketSnapshot
+from src.portfolio import reset_portfolio_state
 from src.rate_limiter import RateLimiter
 from src.trade_executor import configure_trade_executor, execute_action
 from src.trading_crew import build_trading_crew
@@ -113,6 +114,7 @@ class TradingFlow(Flow):
 
         self.broker = make_broker()
         self.rate_limiter = RateLimiter(per_second=3, per_hour=1000, per_day=5000)
+        reset_portfolio_state()
         configure_trade_executor(self.rate_limiter)
 
         self.api_client = None

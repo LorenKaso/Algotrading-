@@ -5,6 +5,8 @@ from typing import Any
 
 from src.crewai_models import DecisionModel, MarketSnapshotModel, RiskResult
 from src.market_snapshot import MarketSnapshot
+from src.portfolio import record_sell_fill, reset_portfolio_state
+from src.trade_executor import get_sell_cooldown_min, is_buy_blocked_by_sell_cooldown
 
 
 def run_backtest(
@@ -18,6 +20,8 @@ def run_backtest(
     initial_cash: float,
 ) -> dict[str, Any]:
     _ = broker
+    reset_portfolio_state()
+    sell_cooldown_min = get_sell_cooldown_min()
     clean_symbols = [symbol.upper() for symbol in symbols]
     cash = float(initial_cash)
     positions = {symbol: 0 for symbol in clean_symbols}
@@ -87,25 +91,33 @@ def run_backtest(
             if symbol is None or symbol not in prices:
                 print(f"[backtest][executor] SKIP BUY: invalid symbol {symbol}")
             else:
-                price = prices[symbol]
-                if cash >= price:
-                    current_qty = positions[symbol]
-                    current_avg = avg_entry_prices.get(symbol, 0.0)
-                    cash -= price
-                    positions[symbol] = current_qty + 1
-                    new_qty = positions[symbol]
-                    total_cost = current_avg * current_qty + price
-                    avg_entry_prices[symbol] = total_cost / new_qty if new_qty > 0 else 0.0
-                    buys += 1
-                    print(
-                        f"[backtest][executor] FILL BUY {symbol} qty=1 at {price:.2f}; "
-                        f"cash={cash:.2f}"
-                    )
+                if is_buy_blocked_by_sell_cooldown(
+                    symbol=symbol,
+                    now_ts=snapshot.timestamp,
+                    cooldown_min=sell_cooldown_min,
+                    log_prefix="[backtest][executor]",
+                ):
+                    pass
                 else:
-                    print(
-                        f"[backtest][executor] SKIP BUY {symbol}: insufficient cash "
-                        f"(cash={cash:.2f}, price={price:.2f})"
-                    )
+                    price = prices[symbol]
+                    if cash >= price:
+                        current_qty = positions[symbol]
+                        current_avg = avg_entry_prices.get(symbol, 0.0)
+                        cash -= price
+                        positions[symbol] = current_qty + 1
+                        new_qty = positions[symbol]
+                        total_cost = current_avg * current_qty + price
+                        avg_entry_prices[symbol] = total_cost / new_qty if new_qty > 0 else 0.0
+                        buys += 1
+                        print(
+                            f"[backtest][executor] FILL BUY {symbol} qty=1 at {price:.2f}; "
+                            f"cash={cash:.2f}"
+                        )
+                    else:
+                        print(
+                            f"[backtest][executor] SKIP BUY {symbol}: insufficient cash "
+                            f"(cash={cash:.2f}, price={price:.2f})"
+                        )
         elif action == "SELL":
             if symbol is None or symbol not in prices:
                 print(f"[backtest][executor] SKIP SELL: invalid symbol {symbol}")
@@ -116,6 +128,7 @@ def run_backtest(
                     cash += price
                     if positions[symbol] == 0:
                         avg_entry_prices[symbol] = 0.0
+                    record_sell_fill(symbol, snapshot.timestamp)
                     sells += 1
                     print(
                         f"[backtest][executor] FILL SELL {symbol} qty=1 at {price:.2f}; "

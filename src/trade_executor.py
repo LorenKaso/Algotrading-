@@ -3,10 +3,13 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from src.decision_types import Decision, TradeAction
 from src.market_snapshot import MarketSnapshot
+from src.portfolio import get_last_sell_ts, record_sell_fill, reset_portfolio_state
 from src.rate_limiter import RateLimiter
+from src.strategy_config import SELL_COOLDOWN_MIN
 
 _rate_limiter: RateLimiter | None = None
 _last_order_by_symbol_side: dict[tuple[str, TradeAction], tuple[float, float]] = {}
@@ -16,6 +19,7 @@ _last_order_by_symbol_side: dict[tuple[str, TradeAction], tuple[float, float]] =
 class ExecutorLimits:
     max_position_percent: float
     max_shares_per_trade: int
+    sell_cooldown_min: int
     buy_cooldown_seconds: float
     price_move_bypass_pct: float
     enable_open_order_guard: bool
@@ -49,6 +53,13 @@ def execute_action(api_client, snapshot: MarketSnapshot, action: Decision) -> No
     if action.action == TradeAction.BUY:
         if latest_price <= 0:
             print(f"[executor] SKIP: invalid or missing price for {symbol}")
+            return
+        if is_buy_blocked_by_sell_cooldown(
+            symbol=symbol,
+            now_ts=snapshot.timestamp,
+            cooldown_min=limits.sell_cooldown_min,
+            log_prefix="[executor]",
+        ):
             return
         if _is_buy_in_cooldown(
             symbol=symbol,
@@ -105,6 +116,8 @@ def execute_action(api_client, snapshot: MarketSnapshot, action: Decision) -> No
         order_id = getattr(order, "id", "unknown")
         order_status = getattr(order, "status", "unknown")
         print(f"[executor] ORDER SENT: id={order_id}, status={order_status}")
+        if action.action == TradeAction.SELL:
+            record_sell_fill(symbol, datetime.now(tz=timezone.utc))
     except Exception as exc:
         print(f"[executor] ERROR: order submission failed: {exc}")
 
@@ -120,6 +133,7 @@ def _wait_for_rate_limit(key: str) -> None:
 def _read_limits() -> ExecutorLimits:
     max_position_raw = os.getenv("MAX_POSITION_PERCENT", "20").strip()
     max_shares_raw = os.getenv("MAX_SHARES_PER_TRADE", "10").strip()
+    sell_cooldown_raw = os.getenv("SELL_COOLDOWN_MIN", str(SELL_COOLDOWN_MIN)).strip()
     cooldown_raw = os.getenv("BUY_COOLDOWN_SECONDS", "60").strip()
     bypass_raw = os.getenv("PRICE_MOVE_BYPASS_PCT", "1.0").strip()
     open_guard_raw = os.getenv("ENABLE_OPEN_ORDER_GUARD", "1").strip()
@@ -139,6 +153,13 @@ def _read_limits() -> ExecutorLimits:
         max_shares_per_trade = 1
 
     try:
+        sell_cooldown_min = int(sell_cooldown_raw)
+    except ValueError:
+        sell_cooldown_min = SELL_COOLDOWN_MIN
+    if sell_cooldown_min < 0:
+        sell_cooldown_min = 0
+
+    try:
         buy_cooldown_seconds = float(cooldown_raw)
     except ValueError:
         buy_cooldown_seconds = 60.0
@@ -155,10 +176,15 @@ def _read_limits() -> ExecutorLimits:
     return ExecutorLimits(
         max_position_percent=max_position_percent,
         max_shares_per_trade=max_shares_per_trade,
+        sell_cooldown_min=sell_cooldown_min,
         buy_cooldown_seconds=buy_cooldown_seconds,
         price_move_bypass_pct=price_move_bypass_pct,
         enable_open_order_guard=open_guard_raw == "1",
     )
+
+
+def get_sell_cooldown_min() -> int:
+    return _read_limits().sell_cooldown_min
 
 
 def _apply_position_cap(
@@ -267,5 +293,39 @@ def _has_open_order(api_client, symbol: str, side: str) -> bool:
     return False
 
 
+def is_buy_blocked_by_sell_cooldown(
+    symbol: str,
+    now_ts: datetime,
+    cooldown_min: int,
+    log_prefix: str = "[executor]",
+) -> bool:
+    if cooldown_min <= 0:
+        return False
+
+    last_sell_ts = get_last_sell_ts(symbol)
+    if last_sell_ts is None:
+        return False
+
+    now_utc = _to_utc(now_ts)
+    last_sell_utc = _to_utc(last_sell_ts)
+    elapsed_min = (now_utc - last_sell_utc).total_seconds() / 60.0
+    if elapsed_min >= cooldown_min:
+        return False
+
+    safe_elapsed = max(0, int(elapsed_min))
+    print(
+        f"{log_prefix} COOLDOWN BUY blocked symbol={symbol} "
+        f"elapsed_min={safe_elapsed} cooldown_min={cooldown_min}"
+    )
+    return True
+
+
+def _to_utc(ts: datetime) -> datetime:
+    if ts.tzinfo is None:
+        return ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone(timezone.utc)
+
+
 def reset_executor_state() -> None:
     _last_order_by_symbol_side.clear()
+    reset_portfolio_state()
